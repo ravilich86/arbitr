@@ -18,6 +18,27 @@ class Side(str, Enum):
     SHORT = "short"
 
 
+class LegStatus(str, Enum):
+    """Статус исполнения ноги."""
+
+    PENDING = "pending"
+    FILLED = "filled"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    CLOSED = "closed"
+
+
+class PositionStatus(str, Enum):
+    """Статус арбитражной позиции."""
+
+    OPENING = "opening"
+    OPEN = "open"
+    CLOSING = "closing"
+    CLOSED = "closed"
+    FAILED = "failed"          # обе ноги не открылись / откат при входе
+    UNHEDGED = "unhedged"      # одна нога висит незахеджированной (leg-risk!)
+
+
 @dataclass(frozen=True)
 class ContractMeta:
     """Метаданные линейного бессрочного контракта (USDT-перп) на одной бирже.
@@ -115,3 +136,56 @@ class ArbSignal:
             "notional": self.notional,
             "timestamp": self.timestamp,
         }
+
+
+@dataclass
+class Leg:
+    """Одна нога арбитражной позиции (§7)."""
+
+    exchange: str
+    symbol: str
+    side: Side
+    amount: float                       # запрошенный объём (база)
+    filled_amount: float = 0.0          # исполнено (база)
+    avg_price: Optional[float] = None   # средняя цена исполнения
+    order_id: Optional[str] = None
+    status: LegStatus = LegStatus.PENDING
+    fee_paid: float = 0.0               # уплаченная комиссия (USDT)
+    error: Optional[str] = None
+
+    @property
+    def is_filled(self) -> bool:
+        return self.status == LegStatus.FILLED and self.filled_amount > 0
+
+    @property
+    def notional(self) -> float:
+        if self.avg_price is None:
+            return 0.0
+        return self.filled_amount * self.avg_price
+
+
+@dataclass
+class Position:
+    """Арбитражная позиция из двух ног (§7)."""
+
+    id: str
+    symbol: str
+    exchange_high: str          # SHORT нога
+    exchange_low: str           # LONG нога
+    short_leg: Leg
+    long_leg: Leg
+    signal: Optional[ArbSignal] = None
+    status: PositionStatus = PositionStatus.OPENING
+    open_time: Optional[float] = None
+    close_time: Optional[float] = None
+    close_reason: Optional[str] = None
+    funding_accrued: float = 0.0        # начисленный funding за удержание (USDT)
+    realized_pnl: Optional[float] = None  # итоговый P&L (USDT)
+
+    @property
+    def legs(self) -> tuple[Leg, Leg]:
+        return (self.short_leg, self.long_leg)
+
+    @property
+    def both_filled(self) -> bool:
+        return self.short_leg.is_filled and self.long_leg.is_filled

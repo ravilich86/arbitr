@@ -86,6 +86,54 @@ class MockCCXTClient:
         self.closed = True
 
 
+class MockTradeClient:
+    """Мок торгового клиента ccxt для тестов Executor.
+
+    behavior управляет поведением create_order:
+      "fill"    -> полностью исполнен по запрошенной цене;
+      "reject"  -> отменён, filled=0;
+      "fail"    -> бросает исключение;
+      "partial" -> исполнена половина.
+    behavior можно задать списком (по вызовам) или строкой (на все вызовы).
+    """
+
+    def __init__(self, behavior="fill", fee_rate=0.0005):
+        self._behavior = behavior
+        self.fee_rate = fee_rate
+        self.orders: list[dict] = []
+        self.leverage_calls: list = []
+        self.margin_calls: list = []
+
+    def _next_behavior(self) -> str:
+        if isinstance(self._behavior, list):
+            return self._behavior[min(len(self.orders), len(self._behavior) - 1)]
+        return self._behavior
+
+    async def create_order(self, symbol, type_, side, amount, price=None, params=None):
+        beh = self._next_behavior()
+        self.orders.append({"symbol": symbol, "type": type_, "side": side,
+                            "amount": amount, "price": price, "params": params or {}})
+        if beh == "fail":
+            raise RuntimeError("exchange error")
+        fill_price = price or 100.0
+        if beh == "reject":
+            return {"id": "o", "status": "canceled", "filled": 0.0,
+                    "amount": amount, "average": None}
+        filled = amount if beh == "fill" else amount / 2
+        status = "closed" if beh == "fill" else "open"
+        return {
+            "id": f"ord{len(self.orders)}", "status": status,
+            "filled": filled, "amount": amount, "average": fill_price,
+            "fee": {"cost": filled * fill_price * self.fee_rate},
+        }
+
+    async def set_leverage(self, leverage, symbol=None):
+        self.leverage_calls.append((leverage, symbol))
+
+    async def set_margin_mode(self, mode, symbol=None):
+        self.margin_calls.append((mode, symbol))
+
+
 class MockMarketClient:
     """Мок клиента с котировками и funding для тестов marketdata.
 
