@@ -1,0 +1,74 @@
+"""Тесты Этапа 1 (§3): фильтрация перпов и коннектор."""
+
+import pytest
+
+from arb.exchanges import (
+    ExchangeConnector,
+    filter_perp_markets,
+    is_usdt_perp,
+    market_to_contract,
+    normalize_symbol,
+)
+from tests.fixtures import MockCCXTClient, binance_markets, make_market
+
+
+def test_normalize_symbol():
+    assert normalize_symbol("btc") == "BTC/USDT"
+    assert normalize_symbol("ETH", "USDT") == "ETH/USDT"
+
+
+def test_is_usdt_perp_accepts_linear_swap():
+    m = make_market("BTC/USDT:USDT", "BTC")
+    assert is_usdt_perp(m) is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"swap": False},          # спот
+        {"linear": False, "quote": "USD", "settle": "BTC"},  # инверс
+        {"quote": "USDC"},        # не USDT
+        {"active": False},        # неактивный
+    ],
+)
+def test_is_usdt_perp_rejects(kwargs):
+    m = make_market("X/USDT:USDT", "X", **kwargs)
+    assert is_usdt_perp(m) is False
+
+
+def test_market_to_contract_extracts_metadata():
+    m = make_market("BTC/USDT:USDT", "BTC", tick=0.1, step=0.001,
+                    min_amount=0.002, min_cost=5, max_leverage=125, contract_size=1.0)
+    c = market_to_contract("binance", m)
+    assert c.exchange == "binance"
+    assert c.symbol == "BTC/USDT"
+    assert c.raw_symbol == "BTC/USDT:USDT"
+    assert c.base == "BTC"
+    assert c.tick_size == 0.1
+    assert c.step_size == 0.001
+    assert c.min_amount == 0.002
+    assert c.min_notional == 5
+    assert c.max_leverage == 125
+    assert c.contract_size == 1.0
+
+
+def test_filter_perp_markets_only_perps():
+    contracts = filter_perp_markets("binance", binance_markets())
+    # из 5 рынков перпами являются только BTC и ETH (DOGE неактивен)
+    assert set(contracts.keys()) == {"BTC/USDT", "ETH/USDT"}
+
+
+async def test_connector_load_perp_contracts():
+    client = MockCCXTClient(binance_markets())
+    conn = ExchangeConnector("binance", client)
+    contracts = await conn.load_perp_contracts()
+    assert client.load_calls == 1
+    assert set(contracts.keys()) == {"BTC/USDT", "ETH/USDT"}
+    assert conn.contracts is contracts
+
+
+async def test_connector_close():
+    client = MockCCXTClient({})
+    conn = ExchangeConnector("binance", client)
+    await conn.close()
+    assert client.closed is True
