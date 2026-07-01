@@ -77,3 +77,41 @@ class Candidate:
     @property
     def exchanges(self) -> list[str]:
         return sorted(self.contracts.keys())
+
+
+@dataclass
+class ArbSignal:
+    """Арбитражный сигнал по паре бирж для одного актива (§6).
+
+    Шорт на дорогой бирже H (по bid_high), лонг на дешёвой L (по ask_low).
+    """
+
+    symbol: str
+    exchange_high: str        # H — дорогая, здесь SHORT
+    exchange_low: str         # L — дешёвая, здесь LONG
+    bid_high: float           # цена, по которой шортим на H
+    ask_low: float            # цена, по которой лонгуем на L
+    raw_spread: float         # (bid_H - ask_L) / ask_L
+    net_spread: float         # чистый спред после комиссий/funding/слиппеджа
+    fee_cost: float = 0.0     # доля: round-trip комиссии обеих ног
+    funding_income: float = 0.0   # доля: ожидаемый чистый funding (+ доход / − расход)
+    slippage_cost: float = 0.0    # доля: ожидаемый слиппедж
+    notional: float = 0.0     # нотионал одной ноги (USDT), под который считали
+    timestamp: Optional[float] = None
+
+    def as_row(self) -> dict:
+        """Плоское представление для логирования."""
+        return {
+            "symbol": self.symbol,
+            "exchange_high": self.exchange_high,
+            "exchange_low": self.exchange_low,
+            "bid_high": self.bid_high,
+            "ask_low": self.ask_low,
+            "raw_spread": self.raw_spread,
+            "net_spread": self.net_spread,
+            "fee_cost": self.fee_cost,
+            "funding_income": self.funding_income,
+            "slippage_cost": self.slippage_cost,
+            "notional": self.notional,
+            "timestamp": self.timestamp,
+        }
