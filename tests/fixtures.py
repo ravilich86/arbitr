@@ -84,3 +84,30 @@ class MockCCXTClient:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class MockMarketClient:
+    """Мок клиента с котировками и funding для тестов marketdata.
+
+    tickers/order_books/funding: {raw_symbol -> payload}.
+    """
+
+    def __init__(self, tickers=None, order_books=None, funding=None, with_ws=True):
+        self.tickers = tickers or {}
+        self.order_books = order_books or {}
+        self.funding = funding or {}
+        self._with_ws = with_ws
+
+    async def fetch_ticker(self, symbol: str) -> dict:
+        return self.tickers[symbol]
+
+    async def fetch_funding_rate(self, symbol: str) -> dict:
+        return self.funding[symbol]
+
+    # watch_order_book появляется только если with_ws=True
+    def __getattr__(self, name):
+        if name == "watch_order_book" and self.__dict__.get("_with_ws"):
+            async def _watch(symbol: str) -> dict:
+                return self.order_books[symbol]
+            return _watch
+        raise AttributeError(name)
