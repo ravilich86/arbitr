@@ -1,0 +1,114 @@
+"""Тесты Этапа 6 (§7): выход, P&L, условия закрытия."""
+
+import pytest
+
+from arb.executor import (
+    Executor,
+    compute_pnl,
+    current_spread,
+    estimate_open_pnl,
+    should_exit,
+)
+from arb.exchanges import ExchangeConnector
+from arb.models import ArbSignal, ContractMeta, PositionStatus, Quote
+from tests.fixtures import MockTradeClient
+
+
+def q(ex, bid, ask):
+    return Quote(ex, "BTC/USDT", bid, ask, timestamp=0)
+
+
+def test_current_spread():
+    assert current_spread(q("h", 101.0, 101.1), q("l", 99.9, 100.0)) == pytest.approx(0.01)
+
+
+def test_should_exit_target():
+    ok, reason = should_exit(cur_spread=0.0, hold_time=10, exit_spread=0.0,
+                             max_hold_time=3600, max_adverse_spread=0.02)
+    assert ok and reason == "target"
+
+
+def test_should_exit_adverse():
+    ok, reason = should_exit(cur_spread=0.03, hold_time=10, exit_spread=0.0,
+                             max_hold_time=3600, max_adverse_spread=0.02)
+    assert ok and reason == "max_adverse"
+
+
+def test_should_exit_max_hold():
+    ok, reason = should_exit(cur_spread=0.005, hold_time=4000, exit_spread=0.0,
+                             max_hold_time=3600, max_adverse_spread=0.02)
+    assert ok and reason == "max_hold_time"
+
+
+def test_should_exit_take_profit():
+    ok, reason = should_exit(cur_spread=0.005, hold_time=10, exit_spread=0.0,
+                             max_hold_time=3600, max_adverse_spread=0.02,
+                             est_pnl=5.0, take_profit=3.0)
+    assert ok and reason == "take_profit"
+
+
+def test_should_not_exit():
+    ok, reason = should_exit(cur_spread=0.005, hold_time=10, exit_spread=0.0,
+                             max_hold_time=3600, max_adverse_spread=0.02)
+    assert not ok and reason is None
+
+
+def test_compute_pnl_convergence_profit():
+    # вошли: шорт 101, лонг 100; вышли при схождении: шорт откуп 100.5, лонг прод 100.5
+    pnl = compute_pnl(short_entry=101.0, long_entry=100.0, amount=10,
+                      short_close=100.5, long_close=100.5)
+    # short: (101-100.5)*10=5 ; long: (100.5-100)*10=5 -> 10
+    assert pnl == pytest.approx(10.0)
+
+
+def test_compute_pnl_with_fees_and_funding():
+    pnl = compute_pnl(101.0, 100.0, 10, 100.5, 100.5,
+                      entry_fees=2.0, close_fees=2.0, funding_accrued=1.0)
+    assert pnl == pytest.approx(10.0 - 2.0 - 2.0 + 1.0)
+
+
+def meta(ex):
+    return ContractMeta(ex, "BTC/USDT", "BTC/USDT:USDT", "BTC", "USDT",
+                        step_size=0.001, min_amount=0.001, min_notional=5.0, max_leverage=100)
+
+
+def _connectors(bh="fill", bl="fill"):
+    ch = ExchangeConnector("h", MockTradeClient(bh))
+    cl = ExchangeConnector("l", MockTradeClient(bl))
+    ch.contracts = {"BTC/USDT": meta("h")}
+    cl.contracts = {"BTC/USDT": meta("l")}
+    return {"h": ch, "l": cl}
+
+
+async def test_close_position_dry_run_pnl():
+    ex = Executor(_connectors(), fees={"h": 0.0005, "l": 0.0005}, dry_run=True)
+    sig = ArbSignal("BTC/USDT", "h", "l", bid_high=101.0, ask_low=100.0,
+                    raw_spread=0.01, net_spread=0.005, notional=2000.0)
+    pos = await ex.open_position(sig)
+    assert pos.status == PositionStatus.OPEN
+    # закрытие при схождении: H ask=100.4, L bid=100.5
+    pos = await ex.close_position(pos, q("h", 100.4, 100.4), q("l", 100.5, 100.6), "target")
+    assert pos.status == PositionStatus.CLOSED
+    assert pos.close_reason == "target"
+    assert pos.realized_pnl is not None
+    assert pos.realized_pnl > 0  # спред сошёлся в плюс
+
+
+async def test_estimate_open_pnl():
+    ex = Executor(_connectors(), fees={"h": 0.0005, "l": 0.0005}, dry_run=True)
+    sig = ArbSignal("BTC/USDT", "h", "l", bid_high=101.0, ask_low=100.0,
+                    raw_spread=0.01, net_spread=0.005, notional=2000.0)
+    pos = await ex.open_position(sig)
+    est = estimate_open_pnl(pos, q("h", 100.4, 100.4), q("l", 100.5, 100.6))
+    assert est > 0
+
+
+async def test_close_position_leg_fail_unhedged():
+    conns = _connectors("fill", "fill")
+    ex = Executor(conns, fees={"h": 0.0005, "l": 0.0005}, dry_run=False)
+    sig = ArbSignal("BTC/USDT", "h", "l", 101.0, 100.0, 0.01, 0.005, notional=2000.0)
+    pos = await ex.open_position(sig)
+    # при закрытии H нога отклоняется
+    conns["h"].client._behavior = "reject"
+    pos = await ex.close_position(pos, q("h", 100.4, 100.4), q("l", 100.5, 100.6), "target")
+    assert pos.status == PositionStatus.UNHEDGED

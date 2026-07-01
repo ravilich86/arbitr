@@ -31,6 +31,7 @@ from .models import (
     LegStatus,
     Position,
     PositionStatus,
+    Quote,
     Side,
 )
 
@@ -339,3 +340,114 @@ class Executor:
         if pos.status != PositionStatus.UNHEDGED:
             pos.status = PositionStatus.FAILED
             pos.close_reason = pos.close_reason or "leg-fail -> откат выполнен"
+
+    # ---- выход (§7) ----
+    async def close_position(
+        self, pos: Position, quote_high: Quote, quote_low: Quote, reason: str,
+    ) -> Position:
+        """Закрыть обе ноги конкурентно и посчитать P&L (§7).
+
+        SHORT на H закрываем покупкой по ask_H; LONG на L — продажей по bid_L.
+        """
+        pos.status = PositionStatus.CLOSING
+        amount = min(pos.short_leg.filled_amount, pos.long_leg.filled_amount)
+
+        close_short, close_long = await asyncio.gather(
+            self._place_leg(pos.exchange_high, pos.symbol, Side.LONG, amount,
+                            quote_high.ask, reduce_only=True),
+            self._place_leg(pos.exchange_low, pos.symbol, Side.SHORT, amount,
+                            quote_low.bid, reduce_only=True),
+        )
+
+        # leg-risk на выходе: если одна нога не закрылась — пометить и вернуть
+        if not (close_short.is_filled and close_long.is_filled):
+            pos.status = PositionStatus.UNHEDGED
+            pos.close_reason = f"{reason}; выход: одна нога не закрылась"
+            logger.error("Позиция %s: выход неполный (leg-risk)", pos.symbol)
+            return pos
+
+        pos.short_leg.status = LegStatus.CLOSED
+        pos.long_leg.status = LegStatus.CLOSED
+        pos.realized_pnl = compute_pnl(
+            short_entry=pos.short_leg.avg_price or 0.0,
+            long_entry=pos.long_leg.avg_price or 0.0,
+            amount=amount,
+            short_close=close_short.avg_price or 0.0,
+            long_close=close_long.avg_price or 0.0,
+            entry_fees=pos.short_leg.fee_paid + pos.long_leg.fee_paid,
+            close_fees=close_short.fee_paid + close_long.fee_paid,
+            funding_accrued=pos.funding_accrued,
+        )
+        pos.status = PositionStatus.CLOSED
+        pos.close_time = self._clock()
+        pos.close_reason = reason
+        return pos
+
+
+def current_spread(quote_high: Quote, quote_low: Quote) -> float:
+    """Текущий спред позиции той же формулой, что на входе: (bid_H - ask_L)/ask_L."""
+    from .scanner import raw_spread
+    return raw_spread(quote_high.bid, quote_low.ask)
+
+
+def should_exit(
+    cur_spread: float,
+    hold_time: float,
+    exit_spread: float,
+    max_hold_time: float,
+    max_adverse_spread: float,
+    est_pnl: Optional[float] = None,
+    take_profit: Optional[float] = None,
+) -> tuple[bool, Optional[str]]:
+    """Решить, пора ли закрывать позицию, и по какой причине (§7).
+
+    Порядок: схождение до цели -> take-profit -> расхождение сверх лимита ->
+    предельное время удержания.
+    """
+    if cur_spread <= exit_spread:
+        return True, "target"
+    if take_profit is not None and est_pnl is not None and est_pnl >= take_profit:
+        return True, "take_profit"
+    if cur_spread >= max_adverse_spread:
+        return True, "max_adverse"
+    if hold_time >= max_hold_time:
+        return True, "max_hold_time"
+    return False, None
+
+
+def compute_pnl(
+    short_entry: float,
+    long_entry: float,
+    amount: float,
+    short_close: float,
+    long_close: float,
+    entry_fees: float = 0.0,
+    close_fees: float = 0.0,
+    funding_accrued: float = 0.0,
+) -> float:
+    """Итоговый P&L позиции в USDT (§10).
+
+    SHORT: продали по short_entry, откупили по short_close -> (entry-close)*amt.
+    LONG:  купили по long_entry, продали по long_close  -> (close-entry)*amt.
+    Минус все комиссии, плюс начисленный funding.
+    """
+    pnl_short = (short_entry - short_close) * amount
+    pnl_long = (long_close - long_entry) * amount
+    return pnl_short + pnl_long - entry_fees - close_fees + funding_accrued
+
+
+def estimate_open_pnl(pos: Position, quote_high: Quote, quote_low: Quote,
+                      fee_rate_high: float = 0.0, fee_rate_low: float = 0.0) -> float:
+    """Оценка нереализованного P&L при закрытии по текущим ценам (для take-profit)."""
+    amount = min(pos.short_leg.filled_amount, pos.long_leg.filled_amount)
+    close_fees = amount * (quote_high.ask * fee_rate_high + quote_low.bid * fee_rate_low)
+    return compute_pnl(
+        short_entry=pos.short_leg.avg_price or 0.0,
+        long_entry=pos.long_leg.avg_price or 0.0,
+        amount=amount,
+        short_close=quote_high.ask,
+        long_close=quote_low.bid,
+        entry_fees=pos.short_leg.fee_paid + pos.long_leg.fee_paid,
+        close_fees=close_fees,
+        funding_accrued=pos.funding_accrued,
+    )
