@@ -1,0 +1,13 @@
+# --- Core exchange connectivity ---
+ccxt>=4.3.0            # unified REST + ccxt.pro WebSocket interface to all 5 exchanges
+
+# --- Config & secrets ---
+PyYAML>=6.0           # config.yaml parsing
+python-dotenv>=1.0.0  # load API secrets from .env
+
+# --- Runtime helpers ---
+# asyncio is stdlib; no extra dependency needed
+
+# --- Testing (dev) ---
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

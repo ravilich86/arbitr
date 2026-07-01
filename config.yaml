@@ -1,0 +1,89 @@
+# ============================================================================
+#  Конфигурация скрипта межбиржевого фьючерсного арбитража
+#  Все секреты (API-ключи) держим в .env, здесь — только имена переменных.
+#  Значения комиссий/плеча/минимумов исполнитель обязан сверить с биржами
+#  на момент запуска (см. §13 ТЗ — они меняются).
+# ============================================================================
+
+# --- Режим запуска ---
+dry_run: true            # true = не отправлять реальные ордера, только логировать сигналы (§11)
+testnet: false           # true = использовать testnet бирж, где поддерживается
+
+# --- Биржи ---------------------------------------------------------------
+# enabled: включить/выключить биржу. Имена env-переменных с ключами.
+exchanges:
+  binance:
+    enabled: true
+    api_key_env: BINANCE_API_KEY
+    api_secret_env: BINANCE_API_SECRET
+    taker_fee: 0.0005    # 0.05% — ПРОВЕРИТЬ по своему VIP-уровню
+    default_type: swap   # линейные перпы (USDT-M futures)
+  bybit:
+    enabled: false
+    api_key_env: BYBIT_API_KEY
+    api_secret_env: BYBIT_API_SECRET
+    taker_fee: 0.00055   # 0.055% — ПРОВЕРИТЬ
+    default_type: swap
+  okx:
+    enabled: false
+    api_key_env: OKX_API_KEY
+    api_secret_env: OKX_API_SECRET
+    api_password_env: OKX_API_PASSWORD   # OKX требует passphrase
+    taker_fee: 0.0005    # ПРОВЕРИТЬ
+    default_type: swap
+  gate:
+    enabled: false
+    api_key_env: GATE_API_KEY
+    api_secret_env: GATE_API_SECRET
+    taker_fee: 0.0005    # ПРОВЕРИТЬ
+    default_type: swap
+  bitget:
+    enabled: false
+    api_key_env: BITGET_API_KEY
+    api_secret_env: BITGET_API_SECRET
+    api_password_env: BITGET_API_PASSWORD  # Bitget требует passphrase
+    taker_fee: 0.0006    # ПРОВЕРИТЬ
+    default_type: swap
+
+# --- Пороги спреда и выхода (§6, §7) ------------------------------------
+spread:
+  min_gross_spread: 0.005   # 0.5% — порог сырого расхождения (bid_H - ask_L)/ask_L
+  min_net_spread: 0.002     # 0.2% — порог чистой прибыли после всех издержек
+  exit_spread: 0.0          # целевое схождение спреда для закрытия (около 0%)
+  take_profit: null         # опционально: закрыть при достижении P&L (USDT); null = выкл
+  min_spread_persistence: 3 # сек: сколько спред должен держаться ≥ порога (отсекает флэш)
+  hunt_flash: false         # охота за флэш-прострелами (§6). На старте выкл.
+
+# --- Объём и плечо (§8) --------------------------------------------------
+sizing:
+  notional_target: 2000     # ~$100 x 20x целевой нотионал одной ноги (для проверки исполнимости)
+  position_size: null       # если задано (в USDT нотионала) — использовать; иначе минимум биржи
+  leverage: 20              # желаемое плечо; факт = min(20, max_leverage биржи)
+  margin_mode: isolated     # isolated | cross (§8)
+  max_slippage: 0.001       # 0.1% допустимый слиппедж на ногу (§6)
+
+# --- Исполнение (§7) -----------------------------------------------------
+execution:
+  order_type: market        # market | limit (post-only для тонких стаканов)
+  on_leg_failure: rollback  # rollback | retry (что делать, если одна нога не исполнилась)
+  leg_timeout: 5            # сек ожидания исполнения ноги
+
+# --- Управление рисками (§9) --------------------------------------------
+risk:
+  max_concurrent_positions: 1     # одновременных арбитражных сделок
+  max_position_per_exchange: 100  # USDT залога на бирже (бюджет 100 на каждой)
+  max_hold_time: 3600             # сек: принудительное закрытие позиции
+  max_adverse_spread: 0.02        # 2%: спред разошёлся сверх лимита -> контролируемое закрытие
+  liquidation_buffer: 0.03        # 3%: минимальный запас до цены ликвидации
+  cooldown: 300                   # сек паузы по паре после закрытия
+
+# --- Списки тикеров (§4) -------------------------------------------------
+allow_list: []   # если непусто — отслеживать ТОЛЬКО эти нормализованные тикеры (напр. BTC/USDT)
+deny_list:       # исключить спорные/коллизионные тикеры
+  - ""           # placeholder
+
+# --- Логирование (§10) ---------------------------------------------------
+logging:
+  app_log: logs/app.log
+  trades_log: logs/trades.jsonl   # машиночитаемый лог сделок (jsonl | csv)
+  level: INFO
