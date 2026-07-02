@@ -22,7 +22,7 @@ from .logger import SessionSummary, TradeLogger
 from .marketdata import MarketData, parse_ticker
 from .models import Position, PositionStatus
 from .risk import RiskManager
-from .scanner import Scanner, historical_price_divergence
+from .scanner import Scanner, historical_price_divergence, raw_spread
 from .universe import build_universe
 
 logger = logging.getLogger("arb.bot")
@@ -282,27 +282,33 @@ class ArbitrageBot:
         return ("not support" in msg or "only support" in msg
                 or "notsupported" in type(exc).__name__.lower())
 
-    async def _stream_batch(self, exchange: str, symbols: list, method: str) -> None:
-        """Один батчевый BBO/tickers-поток на биржу с автодеградацией метода.
+    async def _stream_batch(self, exchange: str, symbols: list) -> None:
+        """Один батчевый поток BBO/tickers на биржу с очередью способов.
 
-        Если биржа не поддерживает метод для перпов (напр. MEXC watchBidsAsks
-        только для спота) — переключаемся: bids_asks -> tickers -> стакан по паре.
-        Одна задача на биржу (а не N чанков) — ccxt сам чанкует подписки внутри,
-        и это не роняет соединение конкурирующими подписками.
+        Пробуем по порядку: all-market bids_asks -> all-market tickers -> список
+        символов -> стакан по паре. Это покрывает разные ограничения бирж (MEXC
+        не даёт BBO для перпов; Bitget не тянет сотни подписок на одном коннекте).
+        Одна задача на биржу — ccxt сам чанкует подписки внутри.
         """
         raw_list, raw_map = self._raw_map(exchange, symbols)
-        fallbacks = {"bids_asks": "tickers", "tickers": "order_book"}
-        # all-market: подписка на ВЕСЬ рынок одним стримом (watch(None)), фильтруем
-        # свои пары. Так один коннект вместо сотен подписок -> нет лимита стримов
-        # и обрывов 1006 (Binance ~200 стримов/коннект). Если биржа требует явный
-        # список — падаем на raw_list.
-        all_market = True
+        client0 = self.connectors[exchange].client
+        # Очередь попыток: сначала all-market (один стрим на весь рынок — нет лимита
+        # подписок), затем явный список, затем стакан по паре. all-market пробуем и
+        # на bids_asks, и на tickers, т.к. разные биржи поддерживают разное.
+        attempts: list = []
+        for m in ("bids_asks", "tickers"):
+            if hasattr(client0, f"watch_{m}"):
+                attempts.append((m, True))    # all-market
+        for m in ("bids_asks", "tickers"):
+            if hasattr(client0, f"watch_{m}"):
+                attempts.append((m, False))   # явный список
+        attempts.append(("order_book", False))
+
+        idx = 0
         backoff = 1.0
+        fails = 0
         while self._running:
-            client = self.connectors[exchange].client
-            watch = getattr(client, f"watch_{method}", None)
-            if watch is None:
-                method = "order_book"
+            method, all_market = attempts[idx]
             if method == "order_book":
                 logger.info("WS %s: перехожу на стакан по паре (%d пар)",
                             exchange, len(symbols))
@@ -312,27 +318,35 @@ class ArbitrageBot:
                     self._stream_tasks.append(
                         asyncio.create_task(self._stream_quotes(exchange, s)))
                 return
+            client = self.connectors[exchange].client
+            watch = getattr(client, f"watch_{method}")
             try:
                 data = await watch(None if all_market else raw_list)
                 self._ingest_bbo(exchange, raw_map, data)
                 backoff = 1.0
+                fails = 0
                 await asyncio.sleep(0)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - разрыв WS/лимит/не поддержан
+            except Exception as exc:  # noqa: BLE001
                 tn = type(exc).__name__.lower()
-                if all_market and ("argumentsrequired" in tn
-                                   or "requires" in str(exc).lower()):
-                    logger.info("WS %s: all-market не поддержан -> список символов", exchange)
-                    all_market = False
+                needs_symbols = "argumentsrequired" in tn or "requires" in str(exc).lower()
+                if needs_symbols or self._is_unsupported(exc):
+                    idx = min(idx + 1, len(attempts) - 1)
+                    logger.info("WS %s: %s(all_market=%s) не подходит -> следующий способ",
+                                exchange, method, all_market)
+                    backoff = 1.0
                     continue
-                if self._is_unsupported(exc) and method in fallbacks:
-                    nxt = fallbacks[method]
-                    logger.info("WS %s: метод %s не поддержан -> %s", exchange, method, nxt)
-                    method = nxt
-                    all_market = True
+                # прочая ошибка (обрыв 1006, лимит стримов): ретрай, а после серии
+                # неудач переходим к следующему способу (напр. bitget не тянет список).
+                fails += 1
+                logger.warning("WS %s (%d пар, %s): %s", exchange, len(symbols), method, exc)
+                if fails >= 5:
+                    idx = min(idx + 1, len(attempts) - 1)
+                    logger.info("WS %s: %s нестабилен -> следующий способ", exchange, method)
+                    fails = 0
+                    backoff = 1.0
                     continue
-                logger.warning("WS %s (%d пар): %s", exchange, len(symbols), exc)
                 await asyncio.sleep(min(backoff, 30.0))
                 backoff *= 2
 
@@ -386,11 +400,13 @@ class ArbitrageBot:
         стакана-фолбэка — по одной паре со стаггером subscribe_delay, чтобы не
         словить лимит частоты подписок.
         """
-        method = self._stream_method(exchange, prefer_method)
-        logger.info("WS %s: %d пар, метод=%s", exchange, len(symbols), method)
-        if method in ("bids_asks", "tickers"):
+        client = self.connectors[exchange].client
+        has_batch = hasattr(client, "watch_bids_asks") or hasattr(client, "watch_tickers")
+        logger.info("WS %s: %d пар, режим=%s", exchange, len(symbols),
+                    "batch" if has_batch else "order_book")
+        if has_batch:
             self._stream_tasks.append(
-                asyncio.create_task(self._stream_batch(exchange, symbols, method)))
+                asyncio.create_task(self._stream_batch(exchange, symbols)))
             return
         # order_book: по одной паре со стаггером
         for symbol in symbols:
@@ -439,21 +455,65 @@ class ArbitrageBot:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._stream_tasks = []
 
+    # ---- диагностика (heartbeat) ----
+    def log_diagnostics(self, now: Optional[float] = None) -> None:
+        """Показать, что бот реально сканирует: сколько пар с котировками на ≥2
+        биржах и какие сейчас максимальные спреды (даже ниже порога входа).
+
+        Это отвечает на вопрос «почему нет входов»: видно покрытие данными и то,
+        насколько текущие спреды далеки от порога.
+        """
+        now = now if now is not None else self._clock()
+        max_age = (self.scanner.max_quote_age_ms or 10000)
+        fresh_pairs = 0
+        spreads: list = []
+        for symbol, cand in self.candidates.items():
+            quotes = {}
+            for ex in cand.exchanges:
+                q = self.md.get_quote(ex, symbol)
+                if q is None:
+                    continue
+                if q.timestamp is not None and now * 1000 - q.timestamp > max_age:
+                    continue
+                quotes[ex] = q
+            if len(quotes) < 2:
+                continue
+            fresh_pairs += 1
+            exs = list(quotes)
+            best, bh, bl = 0.0, None, None
+            for h in exs:
+                for l in exs:
+                    if h == l:
+                        continue
+                    r = raw_spread(quotes[h].bid, quotes[l].ask)
+                    if r > best:
+                        best, bh, bl = r, h, l
+            if bh:
+                spreads.append((best, symbol, bh, bl))
+        spreads.sort(reverse=True)
+        top = "; ".join(f"{s} {r*100:.2f}% ({h}->{l})" for r, s, h, l in spreads[:5]) or "—"
+        cov = f"{fresh_pairs}/{len(self.candidates)}"
+        logger.info("Диагностика: пар с котировками на ≥2 биржах: %s | топ спреды: %s",
+                    cov, top)
+
     # ---- главный цикл ----
     async def run(self, iterations: Optional[int] = None, interval: float = 1.0,
                   use_ws: bool = True, warmup: float = 5.0,
                   funding_interval: float = 300.0, subscribe_delay: float = 0.3,
-                  symbols_per_stream: int = 100, method: str = "auto") -> None:
+                  symbols_per_stream: int = 100, method: str = "auto",
+                  stats_interval: float = 20.0) -> None:
         await self.refresh_universe()
         if use_ws:
             await self._run_streaming(iterations, interval, warmup, funding_interval,
-                                      subscribe_delay, symbols_per_stream, method)
+                                      subscribe_delay, symbols_per_stream, method,
+                                      stats_interval)
         else:
             await self._run_rest(iterations, interval)
         logger.info(self.summary.render())
 
     async def _run_streaming(self, iterations, interval, warmup, funding_interval,
-                             subscribe_delay, symbols_per_stream, method) -> None:
+                             subscribe_delay, symbols_per_stream, method,
+                             stats_interval: float = 20.0) -> None:
         """Цикл на WS: стримы в фоне непрерывно освежают кэш, цикл сканирует кэш."""
         await self.start_streams(funding_interval, subscribe_delay,
                                  symbols_per_stream, method)
@@ -461,11 +521,17 @@ class ArbitrageBot:
             if warmup:
                 await asyncio.sleep(warmup)  # дать стримам наполнить кэш
             i = 0
+            last_stats = self._clock()
+            self.log_diagnostics()  # первая диагностика сразу после прогрева
             while iterations is None or i < iterations:
                 if self.risk.killed and not self.open_positions:
                     logger.info("Kill-switch: открытых позиций нет — стоп")
                     break
                 await self.poll_once()
+                now = self._clock()
+                if stats_interval and now - last_stats >= stats_interval:
+                    self.log_diagnostics(now)
+                    last_stats = now
                 i += 1
                 if iterations is None or i < iterations:
                     await asyncio.sleep(interval)

@@ -253,6 +253,18 @@ async def test_ws_bbo_streams_populate_cache(tmp_path):
     assert bot.md.get_quote("h", "DOGE/USDT") is None  # чужая пара отфильтрована
 
 
+def test_log_diagnostics_runs(tmp_path, caplog):
+    import logging
+    bot = _bot(tmp_path)
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 101.0, 101.1, timestamp=None)
+    bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.9, 100.0, timestamp=None)
+    with caplog.at_level(logging.INFO, logger="arb.bot"):
+        bot.log_diagnostics(now=1000)
+    text = " ".join(r.message for r in caplog.records)
+    assert "Диагностика" in text
+    assert "BTC/USDT" in text  # пара с расхождением попала в топ
+
+
 async def test_ws_degrades_to_orderbook_when_bbo_unsupported(tmp_path):
     # MEXC-случай: watch_bids_asks/tickers не поддержаны для перпов -> стакан
     ob = {"bids": [[100.0, 5]], "asks": [[100.5, 4]], "timestamp": 1}
