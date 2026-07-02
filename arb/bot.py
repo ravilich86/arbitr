@@ -21,9 +21,16 @@ from .executor import Executor, current_spread, estimate_open_pnl, should_exit
 from .logger import SessionSummary, TradeLogger
 from .marketdata import MarketData, parse_ticker
 from .models import Position, PositionStatus
+from .models import Candidate
 from .risk import RiskManager
-from .scanner import Scanner, historical_price_divergence, raw_spread
+from .scanner import Scanner, candle_low_high, historical_price_divergence, raw_spread
 from .universe import build_universe
+
+
+def _rel_diff(x: float, y: float) -> float:
+    """Относительная разница двух цен (доля)."""
+    ref = (abs(x) + abs(y)) / 2.0
+    return abs(x - y) / ref if ref > 0 else 0.0
 
 logger = logging.getLogger("arb.bot")
 
@@ -81,6 +88,79 @@ class ArbitrageBot:
             len(res.candidates), len(res.suspicious), len(res.single_exchange),
             len(res.delisting),
         )
+
+    # ---- предфильтр вселенной по истории (10 дней, ≤0.3%) ----
+    @staticmethod
+    def _agreeing_exchanges(levels: dict, tol: float) -> list:
+        """Оставить биржи, чьи 10-дневные min/max совпадают в пределах tol.
+
+        levels: {биржа -> (min_low, max_high)}. За эталон берём медиану min и max;
+        оставляем биржи, у которых и минимум, и максимум близки к эталону — значит
+        это один и тот же актив, исторически шедший вместе.
+        """
+        if len(levels) < 2:
+            return list(levels.keys())
+        mins = sorted(v[0] for v in levels.values())
+        maxs = sorted(v[1] for v in levels.values())
+        ref_min = mins[len(mins) // 2]
+        ref_max = maxs[len(maxs) // 2]
+        keep = []
+        for ex, (lo, hi) in levels.items():
+            if _rel_diff(lo, ref_min) <= tol and _rel_diff(hi, ref_max) <= tol:
+                keep.append(ex)
+        return keep
+
+    async def prequalify_universe(self, now: Optional[float] = None,
+                                  concurrency: int = 20) -> None:
+        """Отобрать пары, которые исторически шли вместе (≤ max_divergence).
+
+        До поиска арбитража тянем дневные свечи за N дней по каждой ноге, считаем
+        min/max и оставляем только те пары, где уровни бирж совпадают в пределах
+        порога. Это подтверждает тождественность актива один раз заранее, а не в
+        момент сигнала. Свечи кэшируются (меняются раз в день).
+        """
+        cfg = self.history_cfg or {}
+        if not cfg.get("enabled", False) or not cfg.get("prefilter", True):
+            return
+        timeframe = cfg.get("timeframe", "1d")
+        days = int(cfg.get("days", 10))
+        tol = cfg.get("max_divergence", 0.003)
+        sem = asyncio.Semaphore(concurrency)
+
+        async def fetch(ex, symbol):
+            async with sem:
+                try:
+                    oh = await self.md.update_ohlcv(ex, symbol, timeframe, days, now=now)
+                    return candle_low_high(oh) if oh else None
+                except Exception:  # noqa: BLE001
+                    return None
+
+        async def qualify(symbol, cand):
+            res = await asyncio.gather(*[fetch(ex, symbol) for ex in cand.exchanges])
+            levels = {ex: r for ex, r in zip(cand.exchanges, res) if r is not None}
+            if len(levels) < 2:
+                return symbol, None, "нет данных"
+            keep = self._agreeing_exchanges(levels, tol)
+            if len(keep) < 2:
+                return symbol, None, "разошлись"
+            return symbol, Candidate(symbol, {ex: cand.contracts[ex] for ex in keep}), None
+
+        logger.info("Предфильтр по истории: анализирую %d пар за %d дней (≤%.2f%%)…",
+                    len(self.candidates), days, tol * 100)
+        items = list(self.candidates.items())
+        results = await asyncio.gather(*[qualify(s, c) for s, c in items])
+
+        qualified, dropped, nodata = {}, 0, 0
+        for symbol, cand, reason in results:
+            if cand is not None:
+                qualified[symbol] = cand
+            elif reason == "нет данных":
+                nodata += 1
+            else:
+                dropped += 1
+        self.candidates = qualified
+        logger.info("Предфильтр: в работе %d пар (отсеяно по расхождению %d, нет данных %d)",
+                    len(qualified), dropped, nodata)
 
     # ---- обновление котировок/funding (§5) ----
     async def refresh_market_data(self, use_ws: bool = True) -> None:
@@ -220,6 +300,11 @@ class ArbitrageBot:
             if require:
                 return False, (f"текущий спред {signal.raw_spread:.4f} < {check_spread} "
                                "(пара ещё не разошлась)")
+            return True, None
+
+        # В режиме предфильтра тождественность уже подтверждена заранее
+        # (prequalify_universe) — на входе свечи повторно не тянем.
+        if cfg.get("prefilter", True):
             return True, None
 
         timeframe = cfg.get("timeframe", "1d")
@@ -503,6 +588,8 @@ class ArbitrageBot:
                   symbols_per_stream: int = 100, method: str = "auto",
                   stats_interval: float = 20.0) -> None:
         await self.refresh_universe()
+        await self.prequalify_universe(
+            concurrency=int((self.history_cfg or {}).get("prefilter_concurrency", 20)))
         if use_ws:
             await self._run_streaming(iterations, interval, warmup, funding_interval,
                                       subscribe_delay, symbols_per_stream, method,

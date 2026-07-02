@@ -126,7 +126,8 @@ def _hist_candles(low, high):
 
 
 def _enable_history(bot, ohlcv_h, ohlcv_l):
-    bot.history_cfg = {"enabled": True, "check_spread": 0.01,
+    # prefilter=False -> проверяем ленивый режим (сверка свечей в момент сигнала)
+    bot.history_cfg = {"enabled": True, "prefilter": False, "check_spread": 0.01,
                        "timeframe": "1d", "days": 10, "max_divergence": 0.003}
     bot.connectors["h"].client.ohlcv = ohlcv_h
     bot.connectors["l"].client.ohlcv = ohlcv_l
@@ -251,6 +252,64 @@ async def test_ws_bbo_streams_populate_cache(tmp_path):
     q = bot.md.get_quote("h", "BTC/USDT")
     assert q is not None and q.bid == 100.0 and q.ask == 100.5
     assert bot.md.get_quote("h", "DOGE/USDT") is None  # чужая пара отфильтрована
+
+
+def _daily(lo, hi):
+    return [[i, lo, hi, lo, hi, 1] for i in range(10)]
+
+
+def _prefilter_bot(tmp_path, ohlcv_by_ex):
+    cfg = _config(tmp_path)
+    cfg.raw = {"history": {"enabled": True, "prefilter": True, "timeframe": "1d",
+                           "days": 10, "max_divergence": 0.003}}
+    connectors = {}
+    for ex, oh in ohlcv_by_ex.items():
+        c = ExchangeConnector(ex, MockTradeClient("fill", ohlcv=oh))
+        c.contracts = {"BTC/USDT": _meta(ex)}
+        connectors[ex] = c
+    fees = {ex: 0.0005 for ex in connectors}
+    bot = ArbitrageBot(
+        cfg, connectors, MarketData(connectors), Scanner(fees=fees),
+        Executor(connectors, fees, dry_run=True), RiskManager(),
+        TradeLogger(str(tmp_path / "t.jsonl")), SessionSummary(),
+    )
+    bot.candidates = {"BTC/USDT": Candidate("BTC/USDT",
+                      {ex: _meta(ex) for ex in connectors})}
+    return bot
+
+
+def test_agreeing_exchanges():
+    levels = {"a": (100.0, 110.0), "b": (100.1, 110.1), "c": (200.0, 220.0)}
+    keep = ArbitrageBot._agreeing_exchanges(levels, tol=0.003)
+    assert set(keep) == {"a", "b"}  # c — другой актив, отсеян
+
+
+async def test_prequalify_keeps_matching_pair(tmp_path):
+    bot = _prefilter_bot(tmp_path, {"h": _daily(100.0, 110.0), "l": _daily(100.1, 110.1)})
+    await bot.prequalify_universe(now=1000)
+    assert "BTC/USDT" in bot.candidates
+    assert set(bot.candidates["BTC/USDT"].exchanges) == {"h", "l"}
+
+
+async def test_prequalify_drops_divergent_exchange(tmp_path):
+    bot = _prefilter_bot(tmp_path, {"h": _daily(100.0, 110.0),
+                                    "l": _daily(100.1, 110.1),
+                                    "x": _daily(200.0, 220.0)})
+    await bot.prequalify_universe(now=1000)
+    # x отсеивается как другой актив, пара остаётся на h+l
+    assert set(bot.candidates["BTC/USDT"].exchanges) == {"h", "l"}
+
+
+async def test_prequalify_drops_pair_when_all_diverge(tmp_path):
+    bot = _prefilter_bot(tmp_path, {"h": _daily(100.0, 110.0), "l": _daily(200.0, 220.0)})
+    await bot.prequalify_universe(now=1000)
+    assert "BTC/USDT" not in bot.candidates
+
+
+async def test_prequalify_drops_pair_without_data(tmp_path):
+    bot = _prefilter_bot(tmp_path, {"h": _daily(100.0, 110.0), "l": []})
+    await bot.prequalify_universe(now=1000)
+    assert "BTC/USDT" not in bot.candidates
 
 
 def test_log_diagnostics_runs(tmp_path, caplog):
