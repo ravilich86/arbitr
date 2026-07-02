@@ -74,9 +74,19 @@ class ArbitrageBot:
 
     # ---- построение вселенной (§3–4) ----
     async def refresh_universe(self) -> None:
-        contracts = {}
-        for name, conn in self.connectors.items():
-            contracts[name] = await conn.load_perp_contracts()
+        async def load(name, conn):
+            try:
+                return name, await conn.load_perp_contracts()
+            except Exception as exc:  # noqa: BLE001 - одна биржа не должна ронять старт
+                logger.warning("Не удалось загрузить рынки %s: %s — биржа пропущена",
+                               name, exc)
+                return name, {}
+
+        results = await asyncio.gather(
+            *[load(n, c) for n, c in self.connectors.items()])
+        contracts = {name: c for name, c in results}
+        loaded = [n for n, c in results if c]
+        logger.info("Рынки загружены: %s", ", ".join(loaded) or "нет")
         universe_cfg = self.config.raw.get("universe", {}) or {}
         res = build_universe(
             contracts,

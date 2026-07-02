@@ -138,6 +138,16 @@ class MockTradeClient:
         self.margin_calls.append((mode, symbol))
 
 
+class FailingClient:
+    """Клиент, у которого load_markets падает (имитация недоступной биржи)."""
+
+    async def load_markets(self, reload: bool = False):
+        raise RuntimeError("boom: биржа недоступна")
+
+    async def close(self):
+        pass
+
+
 class MockBBOClient:
     """Мок клиента с батчевым BBO (watch_bids_asks): {raw_symbol -> тикер}."""
 

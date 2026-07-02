@@ -92,6 +92,30 @@ class _RecordingNotifier:
         return f"close {pos.symbol} pnl={pos.realized_pnl}"
 
 
+async def test_refresh_universe_tolerates_failing_exchange(tmp_path):
+    from tests.fixtures import (
+        FailingClient,
+        MockCCXTClient,
+        binance_markets,
+        bybit_markets,
+    )
+    conns = {
+        "binance": ExchangeConnector("binance", MockCCXTClient(binance_markets())),
+        "bybit": ExchangeConnector("bybit", MockCCXTClient(bybit_markets())),
+        "mexc": ExchangeConnector("mexc", FailingClient()),  # падает
+    }
+    fees = {"binance": 0.0005, "bybit": 0.0005, "mexc": 0.0004}
+    bot = ArbitrageBot(
+        _config(tmp_path), conns, MarketData(conns), Scanner(fees=fees),
+        Executor(conns, fees, dry_run=True), RiskManager(),
+        TradeLogger(str(tmp_path / "t.jsonl")), SessionSummary(),
+    )
+    await bot.refresh_universe()  # не должно падать из-за mexc
+    # кандидаты собраны из рабочих бирж
+    assert "BTC/USDT" in bot.candidates
+    assert "mexc" not in bot.candidates["BTC/USDT"].contracts
+
+
 async def test_bot_notifies_on_entry(tmp_path):
     bot = _bot(tmp_path)
     bot.notifier = _RecordingNotifier()

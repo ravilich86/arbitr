@@ -206,6 +206,18 @@ def build_ccxt_client(cfg: ExchangeConfig, testnet: bool = False) -> Any:
         params["password"] = cfg.api_password  # passphrase для OKX/Bitget
 
     client = klass(params)
+    # Не загружать список валют при load_markets: это медленный приватный эндпоинт
+    # (напр. MEXC spot capital/config/getall, требует spot-прав и часто таймаутит),
+    # а для арбитража по свопам валюты не нужны — берём только рынки-контракты.
+    try:
+        client.has["fetchCurrencies"] = False
+    except Exception:  # pragma: no cover
+        pass
+    # Более щедрый таймаут на медленные эндпоинты бирж.
+    try:
+        client.timeout = 30000
+    except Exception:  # pragma: no cover
+        pass
     if testnet:
         try:
             client.set_sandbox_mode(True)
