@@ -270,26 +270,52 @@ class ArbitrageBot:
             if quote is not None:
                 self.md.quotes[(exchange, symbol)] = quote
 
-    async def _stream_chunk(self, exchange: str, symbols: list, method: str) -> None:
-        """Батчевый стрим лучших bid/ask для группы пар одной биржи.
+    @staticmethod
+    def _is_unsupported(exc: Exception) -> bool:
+        """Похоже ли исключение на «метод не поддержан для этого рынка»."""
+        msg = str(exc).lower()
+        return ("not support" in msg or "only support" in msg
+                or "notsupported" in type(exc).__name__.lower())
 
-        method: 'bids_asks' (watch_bids_asks — BBO, без checksum стакана) или
-        'tickers' (watch_tickers). Обе возвращают пачку по многим символам сразу,
-        поэтому подписок кратно меньше, чем по стакану на каждую пару.
+    async def _stream_batch(self, exchange: str, symbols: list, method: str) -> None:
+        """Один батчевый BBO/tickers-поток на биржу с автодеградацией метода.
+
+        Если биржа не поддерживает метод для перпов (напр. MEXC watchBidsAsks
+        только для спота) — переключаемся: bids_asks -> tickers -> стакан по паре.
+        Одна задача на биржу (а не N чанков) — ccxt сам чанкует подписки внутри,
+        и это не роняет соединение конкурирующими подписками.
         """
-        client = self.connectors[exchange].client
         raw_list, raw_map = self._raw_map(exchange, symbols)
-        watch = getattr(client, f"watch_{method}")
+        fallbacks = {"bids_asks": "tickers", "tickers": "order_book"}
         backoff = 1.0
         while self._running:
+            client = self.connectors[exchange].client
+            watch = getattr(client, f"watch_{method}", None)
+            if watch is None:
+                method = "order_book"
+            if method == "order_book":
+                # деградация к стакану по одной паре
+                logger.info("WS %s: перехожу на стакан по паре (%d пар)",
+                            exchange, len(symbols))
+                for s in symbols:
+                    if not self._running:
+                        return
+                    self._stream_tasks.append(
+                        asyncio.create_task(self._stream_quotes(exchange, s)))
+                return
             try:
                 data = await watch(raw_list)
                 self._ingest_bbo(exchange, raw_map, data)
                 backoff = 1.0
-                await asyncio.sleep(0)  # уступить цикл событий
+                await asyncio.sleep(0)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - разрыв WS/лимит биржи
+            except Exception as exc:  # noqa: BLE001 - разрыв WS/лимит/не поддержан
+                if self._is_unsupported(exc) and method in fallbacks:
+                    nxt = fallbacks[method]
+                    logger.info("WS %s: метод %s не поддержан -> %s", exchange, method, nxt)
+                    method = nxt
+                    continue
                 logger.warning("WS %s (%d пар): %s", exchange, len(symbols), exc)
                 await asyncio.sleep(min(backoff, 30.0))
                 backoff *= 2
@@ -338,26 +364,24 @@ class ArbitrageBot:
         self, exchange: str, symbols: list, subscribe_delay: float,
         symbols_per_stream: int, prefer_method: str,
     ) -> None:
-        """Поднять стримы одной биржи: батчами BBO/tickers, либо стакан по одной паре.
+        """Поднять стримы одной биржи: один батч BBO/tickers, либо стакан по паре.
 
-        Символы режем на чанки (symbols_per_stream) и стартуем чанки с паузой
-        subscribe_delay, чтобы не словить лимит частоты подписок ("request too many").
+        Для BBO/tickers — одна задача на биржу (ccxt чанкует подписки сам). Для
+        стакана-фолбэка — по одной паре со стаггером subscribe_delay, чтобы не
+        словить лимит частоты подписок.
         """
         method = self._stream_method(exchange, prefer_method)
-        chunks = [symbols[i:i + symbols_per_stream]
-                  for i in range(0, len(symbols), max(1, symbols_per_stream))]
-        logger.info("WS %s: %d пар, метод=%s, чанков=%d",
-                    exchange, len(symbols), method, len(chunks))
-        for chunk in chunks:
+        logger.info("WS %s: %d пар, метод=%s", exchange, len(symbols), method)
+        if method in ("bids_asks", "tickers"):
+            self._stream_tasks.append(
+                asyncio.create_task(self._stream_batch(exchange, symbols, method)))
+            return
+        # order_book: по одной паре со стаггером
+        for symbol in symbols:
             if not self._running:
                 return
-            if method == "order_book":
-                for symbol in chunk:  # фолбэк: по одной паре
-                    self._stream_tasks.append(
-                        asyncio.create_task(self._stream_quotes(exchange, symbol)))
-            else:
-                self._stream_tasks.append(
-                    asyncio.create_task(self._stream_chunk(exchange, chunk, method)))
+            self._stream_tasks.append(
+                asyncio.create_task(self._stream_quotes(exchange, symbol)))
             if subscribe_delay > 0:
                 await asyncio.sleep(subscribe_delay)
 

@@ -151,6 +151,23 @@ class MockBBOClient:
         return {s: self.bbo[s] for s in symbols if s in self.bbo}
 
 
+class MockDegradeClient:
+    """Мок биржи, где BBO/tickers не поддержаны для перпов (как MEXC swap),
+    но работает стакан — проверяет автодеградацию метода стрима."""
+
+    def __init__(self, order_book: dict):
+        self.ob = order_book
+
+    async def watch_bids_asks(self, symbols):
+        raise Exception("mexc watchBidsAsks only support spot market")
+
+    async def watch_tickers(self, symbols):
+        raise Exception("only support spot market")
+
+    async def watch_order_book(self, symbol):
+        return self.ob
+
+
 class MockMarketClient:
     """Мок клиента с котировками и funding для тестов marketdata.
 

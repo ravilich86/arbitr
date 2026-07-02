@@ -74,12 +74,31 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
     return ArbitrageBot(config, connectors, md, scanner, executor, risk, trade_logger)
 
 
+def _install_ws_noise_filter(log) -> None:
+    """Приглушить фоновые ошибки WS-соединений (обрывы 1006, «never retrieved»),
+    чтобы они не спамили консоль. Реальные проблемы всё равно логируются в стримах."""
+    loop = asyncio.get_running_loop()
+
+    def handler(_loop, context):
+        exc = context.get("exception")
+        name = type(exc).__name__ if exc else ""
+        msg = context.get("message", "")
+        if name in ("NetworkError", "RequestTimeout") or "never retrieved" in msg \
+                or "Connection closed" in str(exc):
+            log.debug("WS фоновая ошибка подавлена: %s %s", name, msg)
+            return
+        _loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
+
+
 async def _run(args) -> None:
     config = load_config(args.config)
     log = setup_app_logger(
         config.logging.get("app_log", "logs/app.log"),
         level=config.logging.get("level", "INFO"),
     )
+    _install_ws_noise_filter(log)
     enabled = list(config.enabled_exchanges.keys())
     log.info("Старт. dry_run=%s testnet=%s биржи=%s", config.dry_run, config.testnet, enabled)
     if not enabled:

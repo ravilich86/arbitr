@@ -14,7 +14,12 @@ from arb.marketdata import MarketData
 from arb.models import Candidate, ContractMeta, PositionStatus, Quote
 from arb.risk import RiskManager
 from arb.scanner import Scanner
-from tests.fixtures import MockBBOClient, MockMarketClient, MockTradeClient
+from tests.fixtures import (
+    MockBBOClient,
+    MockDegradeClient,
+    MockMarketClient,
+    MockTradeClient,
+)
 
 
 def _meta(ex):
@@ -243,3 +248,25 @@ async def test_ws_bbo_streams_populate_cache(tmp_path):
 
     q = bot.md.get_quote("h", "BTC/USDT")
     assert q is not None and q.bid == 100.0 and q.ask == 100.5
+
+
+async def test_ws_degrades_to_orderbook_when_bbo_unsupported(tmp_path):
+    # MEXC-случай: watch_bids_asks/tickers не поддержаны для перпов -> стакан
+    ob = {"bids": [[100.0, 5]], "asks": [[100.5, 4]], "timestamp": 1}
+    ch = ExchangeConnector("h", MockDegradeClient(ob))
+    ch.contracts = {"BTC/USDT": _meta("h")}
+    connectors = {"h": ch}
+    fees = {"h": 0.0005}
+    bot = ArbitrageBot(
+        _config(tmp_path), connectors, MarketData(connectors),
+        Scanner(fees=fees), Executor(connectors, fees, dry_run=True),
+        RiskManager(), TradeLogger(str(tmp_path / "trades.jsonl")), SessionSummary(),
+    )
+    bot.candidates = {"BTC/USDT": Candidate("BTC/USDT", {"h": _meta("h")})}
+
+    await bot.start_streams(funding_interval=999, subscribe_delay=0)
+    await asyncio.sleep(0.05)
+    await bot.stop_streams()
+
+    q = bot.md.get_quote("h", "BTC/USDT")
+    assert q is not None and q.bid == 100.0  # данные пришли через фолбэк-стакан
