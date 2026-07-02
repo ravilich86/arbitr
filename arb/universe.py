@@ -37,19 +37,27 @@ class UniverseResult:
         return sorted(self.candidates.keys())
 
 
-def _contract_sizes_consistent(contracts: dict[str, ContractMeta], rel_tol: float) -> bool:
-    """Проверить, что размеры контракта по биржам согласованы (эвристика коллизий).
+def _contract_size_units_mismatch(
+    contracts: dict[str, ContractMeta], max_ratio: float
+) -> bool:
+    """Признак РАЗНЫХ ЕДИНИЦ контракта под одним тикером (эвристика коллизий).
 
-    Если у части бирж contract_size не задан — пропускаем проверку (нельзя судить).
-    Расходящиеся размеры могут означать разные базовые активы под одним тикером.
+    Важно: небольшие расхождения contract_size между биржами — норма для линейных
+    USDT-перпов и НЕ означают коллизию. Настоящий тревожный признак — когда размеры
+    отличаются в разы (напр. 1 против 1000): тогда «цены» на биржах несопоставимы,
+    и прямое сравнение спреда бессмысленно.
+
+    Возвращает True (коллизия/разные единицы), только если отношение
+    max/min размеров контракта превышает max_ratio. Если у части бирж размер
+    не задан — по этим биржам не судим.
     """
     sizes = [c.contract_size for c in contracts.values() if c.contract_size]
     if len(sizes) < 2:
-        return True
+        return False
     lo, hi = min(sizes), max(sizes)
     if lo <= 0:
-        return True
-    return (hi - lo) / lo <= rel_tol
+        return False
+    return (hi / lo) > max_ratio
 
 
 def build_universe(
@@ -57,7 +65,7 @@ def build_universe(
     allow_list: list[str] | None = None,
     deny_list: list[str] | None = None,
     min_exchanges: int = 2,
-    contract_size_rel_tol: float = 0.0,
+    max_contract_size_ratio: float = 50.0,
     drop_suspicious: bool = True,
 ) -> UniverseResult:
     """Построить матрицу тождественных пар (§4).
@@ -67,8 +75,9 @@ def build_universe(
         allow_list: если непусто — оставить только эти символы.
         deny_list: символы, которые нужно исключить (коллизии/спорные).
         min_exchanges: минимум бирж, на которых должен быть актив (по умолчанию 2).
-        contract_size_rel_tol: допустимое относительное расхождение contract_size
-            между биржами; 0.0 = требуем точного совпадения там, где размер задан.
+        max_contract_size_ratio: во сколько раз может отличаться размер контракта
+            между биржами, прежде чем пара считается коллизией (разные единицы).
+            Небольшие расхождения — норма, поэтому по умолчанию 50x.
         drop_suspicious: выкидывать подозрительные пары из кандидатов.
     """
     allow = {s.upper() for s in (allow_list or [])}
@@ -95,8 +104,11 @@ def build_universe(
             continue
 
         reasons: list[str] = []
-        if not _contract_sizes_consistent(contracts, contract_size_rel_tol):
-            reasons.append("расходящийся contract_size между биржами")
+        if _contract_size_units_mismatch(contracts, max_contract_size_ratio):
+            reasons.append(
+                f"размер контракта различается >{max_contract_size_ratio:g}x "
+                "(вероятно разные единицы/токены)"
+            )
 
         if reasons:
             result.suspicious[symbol] = reasons

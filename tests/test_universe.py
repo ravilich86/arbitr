@@ -43,33 +43,39 @@ def test_min_exchanges_param():
     assert "SOL/USDT" in res.candidates
 
 
-def test_contract_size_collision_drops_pair():
-    # Один и тот же тикер FOO, но размеры контракта расходятся -> коллизия
-    contracts = {
+def _pair_with_sizes(size_a, size_b):
+    return {
         "binance": {
             "FOO/USDT": ContractMeta("binance", "FOO/USDT", "FOO/USDT:USDT", "FOO",
-                                     "USDT", contract_size=1.0),
+                                     "USDT", contract_size=size_a),
         },
         "bybit": {
             "FOO/USDT": ContractMeta("bybit", "FOO/USDT", "FOO/USDT:USDT", "FOO",
-                                     "USDT", contract_size=100.0),
+                                     "USDT", contract_size=size_b),
         },
     }
-    res = build_universe(contracts, contract_size_rel_tol=0.0)
+
+
+def test_contract_size_units_mismatch_drops_pair():
+    # Размеры отличаются в 100x -> разные единицы -> коллизия
+    res = build_universe(_pair_with_sizes(1.0, 100.0))
     assert "FOO/USDT" not in res.candidates
     assert "FOO/USDT" in res.suspicious
 
 
-def test_contract_size_consistent_kept():
-    contracts = {
-        "binance": {
-            "FOO/USDT": ContractMeta("binance", "FOO/USDT", "FOO/USDT:USDT", "FOO",
-                                     "USDT", contract_size=1.0),
-        },
-        "bybit": {
-            "FOO/USDT": ContractMeta("bybit", "FOO/USDT", "FOO/USDT:USDT", "FOO",
-                                     "USDT", contract_size=1.0),
-        },
-    }
-    res = build_universe(contracts)
+def test_small_contract_size_difference_kept():
+    # Небольшое расхождение (10x < 50x) — это норма, пара остаётся кандидатом
+    res = build_universe(_pair_with_sizes(1.0, 10.0))
     assert "FOO/USDT" in res.candidates
+    assert "FOO/USDT" not in res.suspicious
+
+
+def test_contract_size_consistent_kept():
+    res = build_universe(_pair_with_sizes(1.0, 1.0))
+    assert "FOO/USDT" in res.candidates
+
+
+def test_custom_ratio_threshold():
+    # При max_contract_size_ratio=5 расхождение 10x уже считается коллизией
+    res = build_universe(_pair_with_sizes(1.0, 10.0), max_contract_size_ratio=5.0)
+    assert "FOO/USDT" in res.suspicious

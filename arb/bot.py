@@ -62,10 +62,12 @@ class ArbitrageBot:
         contracts = {}
         for name, conn in self.connectors.items():
             contracts[name] = await conn.load_perp_contracts()
+        universe_cfg = self.config.raw.get("universe", {}) or {}
         res = build_universe(
             contracts,
             allow_list=self.config.allow_list,
             deny_list=self.config.deny_list,
+            max_contract_size_ratio=universe_cfg.get("max_contract_size_ratio", 50.0),
         )
         self.candidates = res.candidates
         logger.info("Вселенная: %d кандидатов, %d подозрительных, %d single-exchange",

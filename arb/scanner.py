@@ -197,6 +197,9 @@ class Scanner:
         notional_target: float = 2000.0,
         hold_hours: float = 1.0,
         default_funding_interval_hours: float = 8.0,
+        max_gross_spread: float = 0.05,
+        max_quote_age_ms: Optional[float] = None,
+        check_top_depth: bool = True,
         persistence: Optional[PersistenceTracker] = None,
     ):
         self.fees = fees
@@ -207,7 +210,40 @@ class Scanner:
         self.notional_target = notional_target
         self.hold_hours = hold_hours
         self.default_funding_interval_hours = default_funding_interval_hours
+        # Верхняя граница сырого спреда: расхождение выше почти всегда означает
+        # ошибку данных (устаревшая котировка / пустой стакан / разные единицы),
+        # а не исполнимый арбитраж — такие сигналы отсекаем (защита от фантомов).
+        self.max_gross_spread = max_gross_spread
+        # Максимальный возраст котировки (мс); старше — данные протухли.
+        self.max_quote_age_ms = max_quote_age_ms
+        # Грубая проверка, что наш объём пролезает по верхушке стакана (вход+выход).
+        self.check_top_depth = check_top_depth
         self.persistence = persistence or PersistenceTracker()
+
+    def _quote_stale(self, quote: Quote, now: Optional[float]) -> bool:
+        """Устарела ли котировка. now — wall-clock секунды; timestamp котировки — мс."""
+        if self.max_quote_age_ms is None or now is None or quote.timestamp is None:
+            return False
+        age_ms = now * 1000.0 - quote.timestamp
+        return age_ms > self.max_quote_age_ms
+
+    def _top_depth_ok(self, required_base: float, quote_high: Quote, quote_low: Quote) -> bool:
+        """Пролезает ли required_base по верхушке стакана на вход И на выход (§6).
+
+        Вход: покупаем L по ask_L, продаём H по bid_H.
+        Выход: откупаем H по ask_H, продаём L по bid_L.
+        Если объём уровня неизвестен (None) — по нему не судим.
+        """
+        needed = [
+            quote_low.ask_volume,   # вход: buy L
+            quote_high.bid_volume,  # вход: sell H
+            quote_high.ask_volume,  # выход: buy H
+            quote_low.bid_volume,   # выход: sell L
+        ]
+        for vol in needed:
+            if vol is not None and vol < required_base:
+                return False
+        return True
 
     def evaluate_pair(
         self,
@@ -242,6 +278,11 @@ class Scanner:
             notional=self.notional_target, timestamp=now,
         )
 
+        # Фильтр 0: sanity — устаревшие котировки и аномально большой спред.
+        if self._quote_stale(quote_high, now) or self._quote_stale(quote_low, now):
+            reasons.append("устаревшая котировка")
+        if raw > self.max_gross_spread:
+            reasons.append(f"raw>{self.max_gross_spread} (вероятно ошибка данных)")
         # Фильтр 1: сырой порог
         if raw < self.min_gross_spread:
             reasons.append(f"raw<{self.min_gross_spread}")
@@ -251,8 +292,13 @@ class Scanner:
         # Фильтр 3: исполнимость по слиппеджу (если оценивали из стакана)
         if est_slippage is not None and est_slippage > self.max_slippage:
             reasons.append(f"slippage>{self.max_slippage}")
-        # Фильтр 4: устойчивость расхождения (persistence)
-        above = raw >= self.min_gross_spread and net >= self.min_net_spread
+        # Фильтр 4: грубая проверка глубины верхушки стакана (вход и выход)
+        if self.check_top_depth:
+            required_base = self.notional_target / ask_l if ask_l > 0 else 0.0
+            if not self._top_depth_ok(required_base, quote_high, quote_low):
+                reasons.append("не хватает глубины стакана (вход/выход)")
+        # Фильтр 5: устойчивость расхождения (persistence)
+        above = self.min_gross_spread <= raw <= self.max_gross_spread and net >= self.min_net_spread
         held = self.persistence.update((symbol, high, low), above)
         if above and held < self.min_spread_persistence:
             reasons.append(f"persistence<{self.min_spread_persistence}s(={held:.1f})")

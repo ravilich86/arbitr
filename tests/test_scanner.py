@@ -154,3 +154,43 @@ def test_scan_symbol_none_when_no_edge():
         "b": q("b", "BTC/USDT", 100.0, 100.1),
     }
     assert s.scan_symbol("BTC/USDT", quotes) is None
+
+
+# ---- защита от фейковых спредов ----
+def test_evaluate_pair_rejects_huge_spread():
+    # сырой спред 7.6% > max_gross_spread -> отклонить как ошибку данных
+    s = _scanner(max_gross_spread=0.05)
+    ev = s.evaluate_pair("TAIKO/USDT", "h", "l",
+                         q("h", "TAIKO/USDT", 1.076, 1.077),
+                         q("l", "TAIKO/USDT", 0.999, 1.0))
+    assert ev.passed is False
+    assert any("ошибка данных" in r for r in ev.reasons)
+
+
+def test_evaluate_pair_rejects_stale_quote():
+    s = _scanner(max_quote_age_ms=5000)
+    # now=100с -> 100000мс; котировка H с timestamp=90000мс -> возраст 10с > 5с
+    qh = Quote("h", "BTC/USDT", 101.0, 101.1, timestamp=90000)
+    ql = Quote("l", "BTC/USDT", 99.9, 100.0, timestamp=100000)
+    ev = s.evaluate_pair("BTC/USDT", "h", "l", qh, ql, now=100.0)
+    assert ev.passed is False
+    assert any("устаревшая" in r for r in ev.reasons)
+
+
+def test_evaluate_pair_rejects_thin_book():
+    # объёма верхушки стакана не хватает под нужный нотионал
+    s = _scanner(notional_target=2000.0, check_top_depth=True)
+    qh = Quote("h", "BTC/USDT", 101.0, 101.1, bid_volume=0.001, ask_volume=0.001)
+    ql = Quote("l", "BTC/USDT", 99.9, 100.0, bid_volume=0.001, ask_volume=0.001)
+    ev = s.evaluate_pair("BTC/USDT", "h", "l", qh, ql)
+    assert ev.passed is False
+    assert any("глубины стакана" in r for r in ev.reasons)
+
+
+def test_evaluate_pair_passes_deep_book():
+    s = _scanner(notional_target=2000.0, check_top_depth=True)
+    # нужно ~20 базы при цене 100; объёмов достаточно
+    qh = Quote("h", "BTC/USDT", 101.0, 101.1, bid_volume=100, ask_volume=100)
+    ql = Quote("l", "BTC/USDT", 99.9, 100.0, bid_volume=100, ask_volume=100)
+    ev = s.evaluate_pair("BTC/USDT", "h", "l", qh, ql)
+    assert ev.passed is True

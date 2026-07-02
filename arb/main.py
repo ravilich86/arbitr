@@ -43,6 +43,8 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
         min_spread_persistence=sp.get("min_spread_persistence", 0.0),
         notional_target=sz.get("notional_target", 2000.0),
         hold_hours=rk.get("max_hold_time", 3600) / 3600.0,
+        max_gross_spread=sp.get("max_gross_spread", 0.05),
+        max_quote_age_ms=sp.get("max_quote_age_ms"),
         persistence=PersistenceTracker(),
     )
 
