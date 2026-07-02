@@ -19,7 +19,7 @@ from .config import Config
 from .exchanges import ExchangeConnector
 from .executor import Executor, current_spread, estimate_open_pnl, should_exit
 from .logger import SessionSummary, TradeLogger
-from .marketdata import MarketData
+from .marketdata import MarketData, parse_ticker
 from .models import Position, PositionStatus
 from .risk import RiskManager
 from .scanner import Scanner, historical_price_divergence
@@ -250,27 +250,79 @@ class ArbitrageBot:
         return {ex: cap for ex in exchanges}
 
     # ---- WS-стриминг ----
-    async def _stream_quotes(self, exchange: str, symbol: str) -> None:
-        """Фоновый стрим стакана по (биржа, символ): watch_order_book в цикле.
+    def _raw_map(self, exchange: str, symbols: list) -> tuple[list, dict]:
+        """Список биржевых символов и обратная карта raw->нормализованный."""
+        conn = self.connectors[exchange]
+        raw_list, raw_map = [], {}
+        for s in symbols:
+            raw = conn.contracts[s].raw_symbol if s in conn.contracts else s
+            raw_list.append(raw)
+            raw_map[raw] = s
+        return raw_list, raw_map
 
-        watch_order_book сам ждёт следующего апдейта, поэтому цикл паузится
-        естественно. Ошибки/разрывы логируем и переподключаемся с backoff.
+    def _ingest_bbo(self, exchange: str, raw_map: dict, data: dict) -> None:
+        """Разложить пачку BBO/тикеров {raw_symbol -> ticker} в кэш котировок."""
+        if not data:
+            return
+        for raw, ticker in data.items():
+            symbol = raw_map.get(raw) or raw
+            quote = parse_ticker(exchange, symbol, ticker or {})
+            if quote is not None:
+                self.md.quotes[(exchange, symbol)] = quote
+
+    async def _stream_chunk(self, exchange: str, symbols: list, method: str) -> None:
+        """Батчевый стрим лучших bid/ask для группы пар одной биржи.
+
+        method: 'bids_asks' (watch_bids_asks — BBO, без checksum стакана) или
+        'tickers' (watch_tickers). Обе возвращают пачку по многим символам сразу,
+        поэтому подписок кратно меньше, чем по стакану на каждую пару.
         """
+        client = self.connectors[exchange].client
+        raw_list, raw_map = self._raw_map(exchange, symbols)
+        watch = getattr(client, f"watch_{method}")
+        backoff = 1.0
+        while self._running:
+            try:
+                data = await watch(raw_list)
+                self._ingest_bbo(exchange, raw_map, data)
+                backoff = 1.0
+                await asyncio.sleep(0)  # уступить цикл событий
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - разрыв WS/лимит биржи
+                logger.warning("WS %s (%d пар): %s", exchange, len(symbols), exc)
+                await asyncio.sleep(min(backoff, 30.0))
+                backoff *= 2
+
+    async def _stream_quotes(self, exchange: str, symbol: str) -> None:
+        """Фолбэк: стрим стакана по одной паре (если нет BBO/tickers)."""
         backoff = 1.0
         while self._running:
             try:
                 await self.md.update_quote(exchange, symbol, use_ws=True)
                 backoff = 1.0
-                # Гарантированно уступаем управление циклу событий: даже если
-                # watch вернулся мгновенно, не монополизируем поток (и позволяем
-                # доставить отмену задачи при остановке).
                 await asyncio.sleep(0)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - разрыв WS/ошибка биржи
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("WS %s %s: %s", exchange, symbol, exc)
                 await asyncio.sleep(min(backoff, 30.0))
                 backoff *= 2
+
+    def _stream_method(self, exchange: str, prefer: str) -> str:
+        """Выбрать метод стрима для биржи: bids_asks -> tickers -> order_book."""
+        client = self.connectors[exchange].client
+        if prefer in ("bids_asks", "tickers", "order_book"):
+            # проверим, что метод реально есть; иначе деградируем
+            if prefer != "order_book" and hasattr(client, f"watch_{prefer}"):
+                return prefer
+            if prefer == "order_book":
+                return "order_book"
+        if hasattr(client, "watch_bids_asks"):
+            return "bids_asks"
+        if hasattr(client, "watch_tickers"):
+            return "tickers"
+        return "order_book"
 
     async def _funding_loop(self, interval: float) -> None:
         """Периодически обновляет funding по всем кандидатам (меняется медленно)."""
@@ -284,25 +336,40 @@ class ArbitrageBot:
 
     async def _launch_exchange_streams(
         self, exchange: str, symbols: list, subscribe_delay: float,
+        symbols_per_stream: int, prefer_method: str,
     ) -> None:
-        """Постепенно поднимать подписки одной биржи, чтобы не словить
-        «request too many»: между подписками выдерживаем subscribe_delay."""
-        for symbol in symbols:
+        """Поднять стримы одной биржи: батчами BBO/tickers, либо стакан по одной паре.
+
+        Символы режем на чанки (symbols_per_stream) и стартуем чанки с паузой
+        subscribe_delay, чтобы не словить лимит частоты подписок ("request too many").
+        """
+        method = self._stream_method(exchange, prefer_method)
+        chunks = [symbols[i:i + symbols_per_stream]
+                  for i in range(0, len(symbols), max(1, symbols_per_stream))]
+        logger.info("WS %s: %d пар, метод=%s, чанков=%d",
+                    exchange, len(symbols), method, len(chunks))
+        for chunk in chunks:
             if not self._running:
                 return
-            self._stream_tasks.append(
-                asyncio.create_task(self._stream_quotes(exchange, symbol)))
+            if method == "order_book":
+                for symbol in chunk:  # фолбэк: по одной паре
+                    self._stream_tasks.append(
+                        asyncio.create_task(self._stream_quotes(exchange, symbol)))
+            else:
+                self._stream_tasks.append(
+                    asyncio.create_task(self._stream_chunk(exchange, chunk, method)))
             if subscribe_delay > 0:
                 await asyncio.sleep(subscribe_delay)
 
     async def start_streams(
-        self, funding_interval: float = 300.0, subscribe_delay: float = 0.1,
+        self, funding_interval: float = 300.0, subscribe_delay: float = 0.3,
+        symbols_per_stream: int = 100, method: str = "auto",
     ) -> None:
         """Запустить фоновые WS-стримы котировок + периодический funding.
 
-        Подписки поднимаются НЕ залпом, а порционно (per-exchange лаунчеры с паузой
-        subscribe_delay), иначе биржи отбивают поток subscribe-запросов лимитом
-        «request too many» (напр. Bitget code 30006).
+        По умолчанию используем батчевый BBO (watch_bids_asks): один поток на группу
+        пар вместо стакана на каждую пару — кратно меньше подписок, без ошибок
+        checksum стакана и лимита "request too many".
         """
         self._running = True
         self._stream_tasks = []
@@ -314,13 +381,13 @@ class ArbitrageBot:
 
         for ex, symbols in by_exchange.items():
             self._stream_tasks.append(
-                asyncio.create_task(
-                    self._launch_exchange_streams(ex, symbols, subscribe_delay)))
+                asyncio.create_task(self._launch_exchange_streams(
+                    ex, symbols, subscribe_delay, symbols_per_stream, method)))
         self._stream_tasks.append(
             asyncio.create_task(self._funding_loop(funding_interval)))
         total = sum(len(s) for s in by_exchange.values())
-        logger.info("Поднимаю WS-подписки: %d по %d биржам (пауза %.3fс между подписками)",
-                    total, len(by_exchange), subscribe_delay)
+        logger.info("Поднимаю WS-стримы: %d пар по %d биржам (батч=%d, пауза=%.2fс)",
+                    total, len(by_exchange), symbols_per_stream, subscribe_delay)
 
     async def stop_streams(self) -> None:
         self._running = False
@@ -335,19 +402,21 @@ class ArbitrageBot:
     # ---- главный цикл ----
     async def run(self, iterations: Optional[int] = None, interval: float = 1.0,
                   use_ws: bool = True, warmup: float = 5.0,
-                  funding_interval: float = 300.0, subscribe_delay: float = 0.1) -> None:
+                  funding_interval: float = 300.0, subscribe_delay: float = 0.3,
+                  symbols_per_stream: int = 100, method: str = "auto") -> None:
         await self.refresh_universe()
         if use_ws:
-            await self._run_streaming(iterations, interval, warmup,
-                                      funding_interval, subscribe_delay)
+            await self._run_streaming(iterations, interval, warmup, funding_interval,
+                                      subscribe_delay, symbols_per_stream, method)
         else:
             await self._run_rest(iterations, interval)
         logger.info(self.summary.render())
 
     async def _run_streaming(self, iterations, interval, warmup, funding_interval,
-                             subscribe_delay) -> None:
+                             subscribe_delay, symbols_per_stream, method) -> None:
         """Цикл на WS: стримы в фоне непрерывно освежают кэш, цикл сканирует кэш."""
-        await self.start_streams(funding_interval, subscribe_delay)
+        await self.start_streams(funding_interval, subscribe_delay,
+                                 symbols_per_stream, method)
         try:
             if warmup:
                 await asyncio.sleep(warmup)  # дать стримам наполнить кэш

@@ -138,6 +138,19 @@ class MockTradeClient:
         self.margin_calls.append((mode, symbol))
 
 
+class MockBBOClient:
+    """Мок клиента с батчевым BBO (watch_bids_asks): {raw_symbol -> тикер}."""
+
+    def __init__(self, bbo: dict):
+        self.bbo = bbo
+        self.calls = 0
+
+    async def watch_bids_asks(self, symbols):
+        self.calls += 1
+        # возвращаем только запрошенные символы
+        return {s: self.bbo[s] for s in symbols if s in self.bbo}
+
+
 class MockMarketClient:
     """Мок клиента с котировками и funding для тестов marketdata.
 

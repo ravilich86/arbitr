@@ -192,7 +192,12 @@ def build_ccxt_client(cfg: ExchangeConfig, testnet: bool = False) -> Any:
 
     params: dict[str, Any] = {
         "enableRateLimit": True,  # обработка лимитов запросов (§3)
-        "options": {"defaultType": cfg.default_type},
+        "options": {
+            "defaultType": cfg.default_type,
+            # Нам нужен только лучший bid/ask, полная валидность стакана не важна;
+            # глушим checksum, чтобы не сыпались ошибки при переподписках (фолбэк).
+            "watchOrderBook": {"checksum": False},
+        },
     }
     if cfg.api_key and cfg.api_secret:
         params["apiKey"] = cfg.api_key

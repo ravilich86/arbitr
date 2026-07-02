@@ -94,7 +94,9 @@ async def _run(args) -> None:
             use_ws=not args.rest,
             warmup=ws_cfg.get("warmup", 5.0),
             funding_interval=ws_cfg.get("funding_interval", 300.0),
-            subscribe_delay=ws_cfg.get("subscribe_delay", 0.1),
+            subscribe_delay=ws_cfg.get("subscribe_delay", 0.3),
+            symbols_per_stream=ws_cfg.get("symbols_per_stream", 100),
+            method=ws_cfg.get("method", "auto"),
         )
     finally:
         for conn in bot.connectors.values():
