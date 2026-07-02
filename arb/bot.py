@@ -67,7 +67,7 @@ class ArbitrageBot:
             contracts,
             allow_list=self.config.allow_list,
             deny_list=self.config.deny_list,
-            max_contract_size_ratio=universe_cfg.get("max_contract_size_ratio", 50.0),
+            max_contract_size_ratio=universe_cfg.get("max_contract_size_ratio"),
         )
         self.candidates = res.candidates
         logger.info("Вселенная: %d кандидатов, %d подозрительных, %d single-exchange",

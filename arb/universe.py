@@ -65,7 +65,7 @@ def build_universe(
     allow_list: list[str] | None = None,
     deny_list: list[str] | None = None,
     min_exchanges: int = 2,
-    max_contract_size_ratio: float = 50.0,
+    max_contract_size_ratio: float | None = None,
     drop_suspicious: bool = True,
 ) -> UniverseResult:
     """Построить матрицу тождественных пар (§4).
@@ -76,8 +76,13 @@ def build_universe(
         deny_list: символы, которые нужно исключить (коллизии/спорные).
         min_exchanges: минимум бирж, на которых должен быть актив (по умолчанию 2).
         max_contract_size_ratio: во сколько раз может отличаться размер контракта
-            между биржами, прежде чем пара считается коллизией (разные единицы).
-            Небольшие расхождения — норма, поэтому по умолчанию 50x.
+            между биржами, прежде чем пара считается коллизией. По умолчанию None
+            (проверка ВЫКЛЮЧЕНА): contractSize — это множитель контракта, он законно
+            отличается между биржами на порядки (напр. MEXC = 0.0001, Binance = 1) и
+            НЕ влияет на цену (ccxt нормализует котировки к цене за 1 базовую единицу).
+            Поэтому по contractSize коллизии не ловим — их отсекает ценовой sanity-cap
+            сканера (max_gross_spread) и deny_list. Значение задаётся лишь при явной
+            необходимости.
         drop_suspicious: выкидывать подозрительные пары из кандидатов.
     """
     allow = {s.upper() for s in (allow_list or [])}
@@ -104,7 +109,8 @@ def build_universe(
             continue
 
         reasons: list[str] = []
-        if _contract_size_units_mismatch(contracts, max_contract_size_ratio):
+        if (max_contract_size_ratio is not None
+                and _contract_size_units_mismatch(contracts, max_contract_size_ratio)):
             reasons.append(
                 f"размер контракта различается >{max_contract_size_ratio:g}x "
                 "(вероятно разные единицы/токены)"

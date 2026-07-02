@@ -56,26 +56,22 @@ def _pair_with_sizes(size_a, size_b):
     }
 
 
-def test_contract_size_units_mismatch_drops_pair():
-    # Размеры отличаются в 100x -> разные единицы -> коллизия
-    res = build_universe(_pair_with_sizes(1.0, 100.0))
-    assert "FOO/USDT" not in res.candidates
-    assert "FOO/USDT" in res.suspicious
-
-
-def test_small_contract_size_difference_kept():
-    # Небольшое расхождение (10x < 50x) — это норма, пара остаётся кандидатом
-    res = build_universe(_pair_with_sizes(1.0, 10.0))
+def test_contract_size_check_disabled_by_default():
+    # По умолчанию проверка по contractSize ВЫКЛ: разный множитель (напр. MEXC 0.0001
+    # против Binance 1 = 10000x) — это норма, пара остаётся кандидатом
+    res = build_universe(_pair_with_sizes(1.0, 10000.0))
     assert "FOO/USDT" in res.candidates
     assert "FOO/USDT" not in res.suspicious
 
 
-def test_contract_size_consistent_kept():
-    res = build_universe(_pair_with_sizes(1.0, 1.0))
-    assert "FOO/USDT" in res.candidates
-
-
-def test_custom_ratio_threshold():
-    # При max_contract_size_ratio=5 расхождение 10x уже считается коллизией
-    res = build_universe(_pair_with_sizes(1.0, 10.0), max_contract_size_ratio=5.0)
+def test_contract_size_units_mismatch_when_explicitly_enabled():
+    # Если явно задать порог — большое расхождение считается коллизией
+    res = build_universe(_pair_with_sizes(1.0, 100.0), max_contract_size_ratio=50.0)
+    assert "FOO/USDT" not in res.candidates
     assert "FOO/USDT" in res.suspicious
+
+
+def test_small_difference_kept_with_threshold():
+    # 10x < 50x -> в пределах порога, пара остаётся
+    res = build_universe(_pair_with_sizes(1.0, 10.0), max_contract_size_ratio=50.0)
+    assert "FOO/USDT" in res.candidates
