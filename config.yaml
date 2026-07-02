@@ -19,26 +19,26 @@ exchanges:
     taker_fee: 0.0005    # 0.05% — ПРОВЕРИТЬ по своему VIP-уровню
     default_type: swap   # линейные перпы (USDT-M futures)
   bybit:
-    enabled: false
+    enabled: true
     api_key_env: BYBIT_API_KEY
     api_secret_env: BYBIT_API_SECRET
     taker_fee: 0.00055   # 0.055% — ПРОВЕРИТЬ
     default_type: swap
   okx:
-    enabled: false
+    enabled: true
     api_key_env: OKX_API_KEY
     api_secret_env: OKX_API_SECRET
     api_password_env: OKX_API_PASSWORD   # OKX требует passphrase
     taker_fee: 0.0005    # ПРОВЕРИТЬ
     default_type: swap
-  gate:
-    enabled: false
-    api_key_env: GATE_API_KEY
-    api_secret_env: GATE_API_SECRET
-    taker_fee: 0.0005    # ПРОВЕРИТЬ
+  mexc:
+    enabled: true
+    api_key_env: MEXC_API_KEY
+    api_secret_env: MEXC_API_SECRET
+    taker_fee: 0.0004    # 0.04% — ПРОВЕРИТЬ (фьючерсы MEXC)
     default_type: swap
   bitget:
-    enabled: false
+    enabled: true
     api_key_env: BITGET_API_KEY
     api_secret_env: BITGET_API_SECRET
     api_password_env: BITGET_API_PASSWORD  # Bitget требует passphrase
