@@ -18,7 +18,7 @@ from .config import Config, ExchangeConfig
 from .models import ContractMeta
 
 # Биржи, поддерживаемые на старте (§0). Имена = id ccxt.
-SUPPORTED_EXCHANGES = ("binance", "bybit", "okx", "mexc", "bitget")
+SUPPORTED_EXCHANGES = ("binance", "bybit", "okx", "mexc", "bitget", "gate")
 
 
 # --------------------------------------------------------------------------

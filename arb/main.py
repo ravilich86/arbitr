@@ -87,9 +87,15 @@ async def _run(args) -> None:
         return
 
     bot = build_bot(config)
+    ws_cfg = config.raw.get("ws", {}) or {}
     try:
-        await bot.run(iterations=args.iterations, interval=args.interval,
-                      use_ws=not args.rest)
+        await bot.run(
+            iterations=args.iterations, interval=args.interval,
+            use_ws=not args.rest,
+            warmup=ws_cfg.get("warmup", 5.0),
+            funding_interval=ws_cfg.get("funding_interval", 300.0),
+            subscribe_delay=ws_cfg.get("subscribe_delay", 0.1),
+        )
     finally:
         for conn in bot.connectors.values():
             await conn.close()

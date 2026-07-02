@@ -9,6 +9,14 @@
 dry_run: true            # true = не отправлять реальные ордера, только логировать сигналы (§11)
 testnet: false           # true = использовать testnet бирж, где поддерживается
 
+# --- WebSocket-стриминг ---
+ws:
+  subscribe_delay: 0.1   # пауза (сек) между подписками в рамках одной биржи, чтобы не
+                         # словить лимит потока subscribe-запросов ("request too many").
+                         # Увеличь, если биржа всё равно ругается; уменьши для быстрого старта.
+  warmup: 5              # сек прогрева перед первым сканом (дать стримам наполнить кэш)
+  funding_interval: 300  # сек между обновлениями funding по всем парам
+
 # --- Биржи ---------------------------------------------------------------
 # enabled: включить/выключить биржу. Имена env-переменных с ключами.
 exchanges:
@@ -43,6 +51,12 @@ exchanges:
     api_secret_env: BITGET_API_SECRET
     api_password_env: BITGET_API_PASSWORD  # Bitget требует passphrase
     taker_fee: 0.0006    # ПРОВЕРИТЬ
+    default_type: swap
+  gate:
+    enabled: true
+    api_key_env: GATE_API_KEY
+    api_secret_env: GATE_API_SECRET
+    taker_fee: 0.0005    # 0.05% — ПРОВЕРИТЬ (фьючерсы Gate)
     default_type: swap
 
 # --- Пороги спреда и выхода (§6, §7) ------------------------------------

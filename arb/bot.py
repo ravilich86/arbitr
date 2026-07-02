@@ -282,40 +282,72 @@ class ArbitrageBot:
                 await asyncio.gather(*tasks, return_exceptions=True)
             await asyncio.sleep(interval)
 
-    async def start_streams(self, funding_interval: float = 300.0) -> None:
-        """Запустить фоновые WS-стримы котировок + периодический funding."""
+    async def _launch_exchange_streams(
+        self, exchange: str, symbols: list, subscribe_delay: float,
+    ) -> None:
+        """Постепенно поднимать подписки одной биржи, чтобы не словить
+        «request too many»: между подписками выдерживаем subscribe_delay."""
+        for symbol in symbols:
+            if not self._running:
+                return
+            self._stream_tasks.append(
+                asyncio.create_task(self._stream_quotes(exchange, symbol)))
+            if subscribe_delay > 0:
+                await asyncio.sleep(subscribe_delay)
+
+    async def start_streams(
+        self, funding_interval: float = 300.0, subscribe_delay: float = 0.1,
+    ) -> None:
+        """Запустить фоновые WS-стримы котировок + периодический funding.
+
+        Подписки поднимаются НЕ залпом, а порционно (per-exchange лаунчеры с паузой
+        subscribe_delay), иначе биржи отбивают поток subscribe-запросов лимитом
+        «request too many» (напр. Bitget code 30006).
+        """
         self._running = True
         self._stream_tasks = []
+
+        by_exchange: dict[str, list] = {}
         for symbol, cand in self.candidates.items():
             for ex in cand.exchanges:
-                self._stream_tasks.append(
-                    asyncio.create_task(self._stream_quotes(ex, symbol)))
+                by_exchange.setdefault(ex, []).append(symbol)
+
+        for ex, symbols in by_exchange.items():
+            self._stream_tasks.append(
+                asyncio.create_task(
+                    self._launch_exchange_streams(ex, symbols, subscribe_delay)))
         self._stream_tasks.append(
             asyncio.create_task(self._funding_loop(funding_interval)))
-        logger.info("Запущено WS-стримов: %d", len(self._stream_tasks) - 1)
+        total = sum(len(s) for s in by_exchange.values())
+        logger.info("Поднимаю WS-подписки: %d по %d биржам (пауза %.3fс между подписками)",
+                    total, len(by_exchange), subscribe_delay)
 
     async def stop_streams(self) -> None:
         self._running = False
-        for t in self._stream_tasks:
+        await asyncio.sleep(0)  # дать лаунчерам увидеть _running=False и выйти
+        tasks = list(self._stream_tasks)
+        for t in tasks:
             t.cancel()
-        if self._stream_tasks:
-            await asyncio.gather(*self._stream_tasks, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._stream_tasks = []
 
     # ---- главный цикл ----
     async def run(self, iterations: Optional[int] = None, interval: float = 1.0,
                   use_ws: bool = True, warmup: float = 5.0,
-                  funding_interval: float = 300.0) -> None:
+                  funding_interval: float = 300.0, subscribe_delay: float = 0.1) -> None:
         await self.refresh_universe()
         if use_ws:
-            await self._run_streaming(iterations, interval, warmup, funding_interval)
+            await self._run_streaming(iterations, interval, warmup,
+                                      funding_interval, subscribe_delay)
         else:
             await self._run_rest(iterations, interval)
         logger.info(self.summary.render())
 
-    async def _run_streaming(self, iterations, interval, warmup, funding_interval) -> None:
+    async def _run_streaming(self, iterations, interval, warmup, funding_interval,
+                             subscribe_delay) -> None:
         """Цикл на WS: стримы в фоне непрерывно освежают кэш, цикл сканирует кэш."""
-        await self.start_streams(funding_interval)
+        await self.start_streams(funding_interval, subscribe_delay)
         try:
             if warmup:
                 await asyncio.sleep(warmup)  # дать стримам наполнить кэш
