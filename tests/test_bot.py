@@ -226,8 +226,10 @@ async def test_ws_streams_populate_cache(tmp_path):
 
 
 async def test_ws_bbo_streams_populate_cache(tmp_path):
-    # Батчевый BBO: watch_bids_asks отдаёт лучший bid/ask пачкой
-    bbo = {"BTC/USDT:USDT": {"bid": 100.0, "ask": 100.5, "timestamp": 1}}
+    # Батчевый BBO (all-market): watch_bids_asks(None) отдаёт весь рынок пачкой,
+    # чужие пары (DOGE) должны отфильтроваться, остаётся наша BTC
+    bbo = {"BTC/USDT:USDT": {"bid": 100.0, "ask": 100.5, "timestamp": 1},
+           "DOGE/USDT:USDT": {"bid": 0.1, "ask": 0.11, "timestamp": 1}}
     ch = ExchangeConnector("h", MockBBOClient(bbo))
     cl = ExchangeConnector("l", MockBBOClient(bbo))
     ch.contracts = {"BTC/USDT": _meta("h")}
@@ -248,6 +250,7 @@ async def test_ws_bbo_streams_populate_cache(tmp_path):
 
     q = bot.md.get_quote("h", "BTC/USDT")
     assert q is not None and q.bid == 100.0 and q.ask == 100.5
+    assert bot.md.get_quote("h", "DOGE/USDT") is None  # чужая пара отфильтрована
 
 
 async def test_ws_degrades_to_orderbook_when_bbo_unsupported(tmp_path):

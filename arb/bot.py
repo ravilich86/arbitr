@@ -261,11 +261,16 @@ class ArbitrageBot:
         return raw_list, raw_map
 
     def _ingest_bbo(self, exchange: str, raw_map: dict, data: dict) -> None:
-        """Разложить пачку BBO/тикеров {raw_symbol -> ticker} в кэш котировок."""
+        """Разложить пачку BBO/тикеров {raw_symbol -> ticker} в кэш котировок.
+
+        Берём только наши кандидатные символы (в all-market стриме приходят все
+        пары биржи — чужие игнорируем)."""
         if not data:
             return
         for raw, ticker in data.items():
-            symbol = raw_map.get(raw) or raw
+            symbol = raw_map.get(raw)
+            if symbol is None:
+                continue
             quote = parse_ticker(exchange, symbol, ticker or {})
             if quote is not None:
                 self.md.quotes[(exchange, symbol)] = quote
@@ -287,6 +292,11 @@ class ArbitrageBot:
         """
         raw_list, raw_map = self._raw_map(exchange, symbols)
         fallbacks = {"bids_asks": "tickers", "tickers": "order_book"}
+        # all-market: подписка на ВЕСЬ рынок одним стримом (watch(None)), фильтруем
+        # свои пары. Так один коннект вместо сотен подписок -> нет лимита стримов
+        # и обрывов 1006 (Binance ~200 стримов/коннект). Если биржа требует явный
+        # список — падаем на raw_list.
+        all_market = True
         backoff = 1.0
         while self._running:
             client = self.connectors[exchange].client
@@ -294,7 +304,6 @@ class ArbitrageBot:
             if watch is None:
                 method = "order_book"
             if method == "order_book":
-                # деградация к стакану по одной паре
                 logger.info("WS %s: перехожу на стакан по паре (%d пар)",
                             exchange, len(symbols))
                 for s in symbols:
@@ -304,17 +313,24 @@ class ArbitrageBot:
                         asyncio.create_task(self._stream_quotes(exchange, s)))
                 return
             try:
-                data = await watch(raw_list)
+                data = await watch(None if all_market else raw_list)
                 self._ingest_bbo(exchange, raw_map, data)
                 backoff = 1.0
                 await asyncio.sleep(0)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - разрыв WS/лимит/не поддержан
+                tn = type(exc).__name__.lower()
+                if all_market and ("argumentsrequired" in tn
+                                   or "requires" in str(exc).lower()):
+                    logger.info("WS %s: all-market не поддержан -> список символов", exchange)
+                    all_market = False
+                    continue
                 if self._is_unsupported(exc) and method in fallbacks:
                     nxt = fallbacks[method]
                     logger.info("WS %s: метод %s не поддержан -> %s", exchange, method, nxt)
                     method = nxt
+                    all_market = True
                     continue
                 logger.warning("WS %s (%d пар): %s", exchange, len(symbols), exc)
                 await asyncio.sleep(min(backoff, 30.0))

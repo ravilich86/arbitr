@@ -145,9 +145,10 @@ class MockBBOClient:
         self.bbo = bbo
         self.calls = 0
 
-    async def watch_bids_asks(self, symbols):
+    async def watch_bids_asks(self, symbols=None):
         self.calls += 1
-        # возвращаем только запрошенные символы
+        if symbols is None:  # all-market: вернуть весь рынок
+            return dict(self.bbo)
         return {s: self.bbo[s] for s in symbols if s in self.bbo}
 
 
@@ -158,10 +159,10 @@ class MockDegradeClient:
     def __init__(self, order_book: dict):
         self.ob = order_book
 
-    async def watch_bids_asks(self, symbols):
+    async def watch_bids_asks(self, symbols=None):
         raise Exception("mexc watchBidsAsks only support spot market")
 
-    async def watch_tickers(self, symbols):
+    async def watch_tickers(self, symbols=None):
         raise Exception("only support spot market")
 
     async def watch_order_book(self, symbol):
