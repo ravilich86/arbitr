@@ -121,6 +121,8 @@ class MarketData:
         self.connectors = connectors
         self.quotes: dict[tuple[str, str], Quote] = {}
         self.funding: dict[tuple[str, str], FundingInfo] = {}
+        # OHLCV-кэш: (биржа, символ, timeframe) -> (список свечей, время загрузки, unix c)
+        self.ohlcv: dict[tuple[str, str, str], tuple[list, float]] = {}
 
     # ---- котировки ----
     async def update_quote(self, exchange: str, symbol: str, use_ws: bool = True) -> Optional[Quote]:
@@ -157,6 +159,34 @@ class MarketData:
 
     def get_funding(self, exchange: str, symbol: str) -> Optional[FundingInfo]:
         return self.funding.get((exchange, symbol))
+
+    # ---- дневные свечи (для исторической сверки тождественности) ----
+    async def update_ohlcv(
+        self, exchange: str, symbol: str, timeframe: str = "1d", limit: int = 10,
+        ttl: float = 3600.0, now: Optional[float] = None,
+    ) -> Optional[list]:
+        """Загрузить OHLCV с кэшем по TTL (дневные свечи меняются редко).
+
+        Возвращает список свечей [[ts, open, high, low, close, vol], ...].
+        """
+        key = (exchange, symbol, timeframe)
+        cur = now if now is not None else time.time()
+        cached = self.ohlcv.get(key)
+        if cached is not None and (cur - cached[1]) < ttl:
+            return cached[0]
+
+        client = self.connectors[exchange].client
+        if not hasattr(client, "fetch_ohlcv"):
+            return None
+        raw_symbol = self._raw_symbol(exchange, symbol)
+        data = await client.fetch_ohlcv(raw_symbol, timeframe, limit=limit)
+        if data:
+            self.ohlcv[key] = (data, cur)
+        return data
+
+    def get_ohlcv(self, exchange: str, symbol: str, timeframe: str = "1d") -> Optional[list]:
+        cached = self.ohlcv.get((exchange, symbol, timeframe))
+        return cached[0] if cached else None
 
     # ---- служебное ----
     def _raw_symbol(self, exchange: str, symbol: str) -> str:

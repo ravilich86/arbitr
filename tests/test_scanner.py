@@ -6,7 +6,9 @@ from arb.models import FundingInfo, Quote
 from arb.scanner import (
     PersistenceTracker,
     Scanner,
+    candle_low_high,
     expected_net_funding,
+    historical_price_divergence,
     net_spread,
     raw_spread,
     round_trip_fee,
@@ -194,3 +196,35 @@ def test_evaluate_pair_passes_deep_book():
     ql = Quote("l", "BTC/USDT", 99.9, 100.0, bid_volume=100, ask_volume=100)
     ev = s.evaluate_pair("BTC/USDT", "h", "l", qh, ql)
     assert ev.passed is True
+
+
+# ---- историческая сверка тождественности ----
+def _candles(low, high):
+    # [ts, open, high, low, close, vol] x 3 дня
+    return [[i, low, high, low, high, 1] for i in range(3)]
+
+
+def test_candle_low_high():
+    assert candle_low_high(_candles(100.0, 110.0)) == (100.0, 110.0)
+
+
+def test_candle_low_high_empty():
+    assert candle_low_high([]) is None
+
+
+def test_historical_divergence_same_asset_small():
+    a = _candles(100.0, 110.0)
+    b = _candles(100.2, 110.1)  # почти те же уровни
+    div = historical_price_divergence(a, b)
+    assert div < 0.003  # < 0.3% -> один актив
+
+
+def test_historical_divergence_different_asset_large():
+    a = _candles(100.0, 110.0)
+    b = _candles(200.0, 220.0)  # цены в 2 раза выше -> другой актив
+    div = historical_price_divergence(a, b)
+    assert div > 0.3
+
+
+def test_historical_divergence_missing_data():
+    assert historical_price_divergence([], _candles(100, 110)) is None

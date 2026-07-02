@@ -115,6 +115,58 @@ async def test_bot_kill_switch_blocks_entry(tmp_path):
     assert len(bot.open_positions) == 0
 
 
+def _hist_candles(low, high):
+    return [[i, low, high, low, high, 1] for i in range(10)]
+
+
+def _enable_history(bot, ohlcv_h, ohlcv_l):
+    bot.history_cfg = {"enabled": True, "check_spread": 0.01,
+                       "timeframe": "1d", "days": 10, "max_divergence": 0.003}
+    bot.connectors["h"].client.ohlcv = ohlcv_h
+    bot.connectors["l"].client.ohlcv = ohlcv_l
+
+
+def _wide_quotes(bot):
+    # сырой спред ~2% (> check_spread 1%)
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 102.0, 102.1, timestamp=0)
+    bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.9, 100.0, timestamp=0)
+
+
+async def test_history_accepts_matching_asset(tmp_path):
+    bot = _bot(tmp_path)
+    _enable_history(bot, _hist_candles(100.0, 110.0), _hist_candles(100.1, 110.1))
+    _wide_quotes(bot)
+    await bot.poll_once(now=1000)
+    assert len(bot.open_positions) == 1  # уровни совпадают -> вошли
+
+
+async def test_history_rejects_divergent_asset(tmp_path):
+    bot = _bot(tmp_path)
+    _enable_history(bot, _hist_candles(100.0, 110.0), _hist_candles(200.0, 220.0))
+    _wide_quotes(bot)
+    await bot.poll_once(now=1000)
+    assert len(bot.open_positions) == 0  # разные активы -> пропуск
+    assert bot.summary.skipped_signals >= 1
+
+
+async def test_history_rejects_when_no_data(tmp_path):
+    bot = _bot(tmp_path)
+    _enable_history(bot, [], [])  # свечей нет
+    _wide_quotes(bot)
+    await bot.poll_once(now=1000)
+    assert len(bot.open_positions) == 0
+
+
+async def test_history_not_triggered_for_small_spread(tmp_path):
+    bot = _bot(tmp_path)
+    # история включена, но данных нет; спред ~1% (не больше check_spread) -> сверка не нужна
+    _enable_history(bot, [], [])
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 101.0, 101.1, timestamp=0)
+    bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.9, 100.0, timestamp=0)
+    await bot.poll_once(now=1000)
+    assert len(bot.open_positions) == 1  # вошли без исторической сверки
+
+
 async def test_bot_cooldown_blocks_reentry(tmp_path):
     bot = _bot(tmp_path)
     bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 101.0, 101.1, timestamp=0)

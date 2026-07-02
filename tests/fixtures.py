@@ -97,12 +97,16 @@ class MockTradeClient:
     behavior можно задать списком (по вызовам) или строкой (на все вызовы).
     """
 
-    def __init__(self, behavior="fill", fee_rate=0.0005):
+    def __init__(self, behavior="fill", fee_rate=0.0005, ohlcv=None):
         self._behavior = behavior
         self.fee_rate = fee_rate
+        self.ohlcv = ohlcv  # список свечей [[ts,open,high,low,close,vol], ...] или None
         self.orders: list[dict] = []
         self.leverage_calls: list = []
         self.margin_calls: list = []
+
+    async def fetch_ohlcv(self, symbol, timeframe="1d", limit=10, **kwargs):
+        return self.ohlcv or []
 
     def _next_behavior(self) -> str:
         if isinstance(self._behavior, list):

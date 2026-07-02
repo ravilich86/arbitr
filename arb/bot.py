@@ -22,7 +22,7 @@ from .logger import SessionSummary, TradeLogger
 from .marketdata import MarketData
 from .models import Position, PositionStatus
 from .risk import RiskManager
-from .scanner import Scanner
+from .scanner import Scanner, historical_price_divergence
 from .universe import build_universe
 
 logger = logging.getLogger("arb.bot")
@@ -56,6 +56,8 @@ class ArbitrageBot:
 
         self.candidates: dict = {}
         self.open_positions: list[Position] = []
+        # Историческая сверка тождественности при большом текущем спреде
+        self.history_cfg = (config.raw.get("history") or {}) if config.raw else {}
 
     # ---- построение вселенной (§3–4) ----
     async def refresh_universe(self) -> None:
@@ -166,6 +168,13 @@ class ArbitrageBot:
             logger.info("Сигнал %s отклонён риском: %s", best.symbol, decision.reason)
             return
 
+        # Историческая сверка тождественности при большом текущем спреде
+        hist_ok, hist_reason = await self._history_check(best, now)
+        if not hist_ok:
+            self.summary.record_skip()
+            logger.info("Сигнал %s отклонён историей: %s", best.symbol, hist_reason)
+            return
+
         mode = "DRY-RUN" if self.config.dry_run else "LIVE"
         logger.info("[%s] Вход %s: H=%s L=%s raw=%.4f net=%.4f",
                     mode, best.symbol, best.exchange_high, best.exchange_low,
@@ -177,6 +186,47 @@ class ArbitrageBot:
         else:
             self.summary.record_skip()
             logger.warning("Вход %s не состоялся: %s", best.symbol, pos.close_reason)
+
+    async def _history_check(self, signal, now: float) -> tuple[bool, Optional[str]]:
+        """Сверка тождественности активов по дневным свечам при большом спреде.
+
+        Логика (по требованию): если текущий сырой спред превышает check_spread
+        (напр. 1%), сверяем минимумы/максимумы цены обеих ног за последние N дней
+        на дневных свечах. Если исторические уровни расходятся не более чем на
+        max_divergence (напр. 0.3%) — это один и тот же актив, пару берём в работу.
+        Иначе (или если данных нет) — пропускаем: скорее всего разные активы или
+        нестабильная пара.
+
+        Если проверка выключена или спред невелик — всегда True (не мешаем).
+        """
+        cfg = self.history_cfg
+        if not cfg or not cfg.get("enabled", False):
+            return True, None
+        check_spread = cfg.get("check_spread", 0.01)
+        if signal.raw_spread <= check_spread:
+            return True, None  # спред невелик — историческая сверка не нужна
+
+        timeframe = cfg.get("timeframe", "1d")
+        days = int(cfg.get("days", 10))
+        max_div = cfg.get("max_divergence", 0.003)
+
+        oh_h, oh_l = await asyncio.gather(
+            self.md.update_ohlcv(signal.exchange_high, signal.symbol, timeframe, days, now=now),
+            self.md.update_ohlcv(signal.exchange_low, signal.symbol, timeframe, days, now=now),
+            return_exceptions=True,
+        )
+        if isinstance(oh_h, Exception) or isinstance(oh_l, Exception) or not oh_h or not oh_l:
+            return False, "нет исторических данных для сверки"
+
+        div = historical_price_divergence(oh_h, oh_l)
+        if div is None:
+            return False, "недостаточно свечей для сверки"
+        if div > max_div:
+            return False, (f"историческое расхождение {div:.4f} > {max_div} "
+                           "(вероятно разные активы)")
+        logger.info("История %s: расхождение уровней %.4f ≤ %.4f — активы тождественны",
+                    signal.symbol, div, max_div)
+        return True, None
 
     def _free_margin(self, *exchanges: str) -> dict[str, float]:
         """Свободная маржа по биржам. В dry_run считаем бюджет доступным."""

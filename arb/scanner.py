@@ -126,6 +126,41 @@ def walk_book(levels: list, target_notional: float) -> Optional[tuple[float, flo
     return vwap, filled
 
 
+def candle_low_high(ohlcv: list) -> Optional[tuple[float, float]]:
+    """Мин low и макс high по набору свечей ccxt [[ts,open,high,low,close,vol], ...]."""
+    lows, highs = [], []
+    for c in ohlcv or []:
+        if not c or len(c) < 5:
+            continue
+        highs.append(float(c[2]))
+        lows.append(float(c[3]))
+    if not lows or not highs:
+        return None
+    return min(lows), max(highs)
+
+
+def historical_price_divergence(ohlcv_a: list, ohlcv_b: list) -> Optional[float]:
+    """Расхождение ценовых уровней двух активов за период (для сверки тождественности).
+
+    Сравниваем минимум и максимум цены за последние N дней на двух биржах.
+    Для одного и того же актива дневные low/high почти совпадают; для разных
+    токенов под одним тикером — расходятся в разы. Возвращаем максимальное из
+    относительных расхождений (min и max). None, если данных недостаточно.
+    """
+    a = candle_low_high(ohlcv_a)
+    b = candle_low_high(ohlcv_b)
+    if a is None or b is None:
+        return None
+
+    def rel(x: float, y: float) -> float:
+        ref = (abs(x) + abs(y)) / 2.0
+        if ref <= 0:
+            return 0.0
+        return abs(x - y) / ref
+
+    return max(rel(a[0], b[0]), rel(a[1], b[1]))
+
+
 def slippage_from_book(levels: list, ref_price: float, target_notional: float) -> Optional[float]:
     """Оценить слиппедж исполнения target_notional относительно ref_price.
 
