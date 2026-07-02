@@ -69,6 +69,39 @@ def _bot(tmp_path: Path) -> ArbitrageBot:
     return bot
 
 
+class _RecordingNotifier:
+    """Мок нотифаера: пишет отправленные сообщения, не ходит в сеть."""
+
+    enabled = True
+    app_name = "TestBot"
+
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, text):
+        self.sent.append(text)
+        return True
+
+    def startup_message(self, exchanges, pairs, dry_run):
+        return f"start {pairs}"
+
+    def entry_message(self, sig, dry_run):
+        return f"entry {sig.symbol} {sig.exchange_high}->{sig.exchange_low}"
+
+    def close_message(self, pos, dry_run):
+        return f"close {pos.symbol} pnl={pos.realized_pnl}"
+
+
+async def test_bot_notifies_on_entry(tmp_path):
+    bot = _bot(tmp_path)
+    bot.notifier = _RecordingNotifier()
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 101.0, 101.1, timestamp=0)
+    bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.9, 100.0, timestamp=0)
+    await bot.poll_once(now=1000)
+    await asyncio.sleep(0)  # дать фоновой задаче отправки выполниться
+    assert any("entry BTC/USDT" in m for m in bot.notifier.sent)
+
+
 async def test_bot_opens_on_signal(tmp_path):
     bot = _bot(tmp_path)
     # расхождение: H дороже (bid 101), L дешевле (ask 100)

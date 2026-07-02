@@ -48,6 +48,7 @@ class ArbitrageBot:
         risk: RiskManager,
         trade_logger: TradeLogger,
         summary: Optional[SessionSummary] = None,
+        notifier=None,
         clock=None,
     ):
         import time as _time
@@ -59,7 +60,9 @@ class ArbitrageBot:
         self.risk = risk
         self.trade_logger = trade_logger
         self.summary = summary or SessionSummary()
+        self.notifier = notifier
         self._clock = clock or _time.time
+        self._bg_tasks: set = set()
 
         self.candidates: dict = {}
         self.open_positions: list[Position] = []
@@ -218,6 +221,8 @@ class ArbitrageBot:
                 self.summary.record_trade(pos.realized_pnl)
                 logger.info("Закрыта %s: причина=%s P&L=%s", pos.symbol, reason,
                             pos.realized_pnl)
+                if self.notifier:
+                    self._notify(self.notifier.close_message(pos, self.config.dry_run))
             else:
                 still_open.append(pos)
         self.open_positions = still_open
@@ -271,6 +276,8 @@ class ArbitrageBot:
             pos.open_time = now  # единый источник времени для расчёта удержания
             if pos.status == PositionStatus.OPEN:
                 self.open_positions.append(pos)
+                if self.notifier:
+                    self._notify(self.notifier.entry_message(sig, self.config.dry_run))
                 return  # вошли — на этой итерации больше не открываем
             logger.warning("Вход %s не состоялся: %s", sig.symbol, pos.close_reason)
 
@@ -333,6 +340,14 @@ class ArbitrageBot:
         """Свободная маржа по биржам. В dry_run считаем бюджет доступным."""
         cap = self.risk.max_position_per_exchange
         return {ex: cap for ex in exchanges}
+
+    def _notify(self, text: str) -> None:
+        """Отправить уведомление в фоне (не блокируя цикл; ошибки глушатся)."""
+        if not self.notifier or not getattr(self.notifier, "enabled", False):
+            return
+        task = asyncio.create_task(self.notifier.send(text))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     # ---- WS-стриминг ----
     def _raw_map(self, exchange: str, symbols: list) -> tuple[list, dict]:
@@ -590,6 +605,9 @@ class ArbitrageBot:
         await self.refresh_universe()
         await self.prequalify_universe(
             concurrency=int((self.history_cfg or {}).get("prefilter_concurrency", 20)))
+        if self.notifier:
+            self._notify(self.notifier.startup_message(
+                list(self.connectors.keys()), len(self.candidates), self.config.dry_run))
         if use_ws:
             await self._run_streaming(iterations, interval, warmup, funding_interval,
                                       subscribe_delay, symbols_per_stream, method,

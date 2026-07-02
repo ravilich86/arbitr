@@ -19,6 +19,7 @@ from .exchanges import create_connectors
 from .executor import Executor
 from .logger import TradeLogger, setup_app_logger
 from .marketdata import MarketData
+from .notifier import build_notifier
 from .risk import RiskManager
 from .scanner import PersistenceTracker, Scanner
 
@@ -70,8 +71,10 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
     md = MarketData(connectors)
     trade_logger = TradeLogger(
         config.logging.get("trades_log", "logs/trades.jsonl"))
+    notifier = build_notifier(config.telegram)
 
-    return ArbitrageBot(config, connectors, md, scanner, executor, risk, trade_logger)
+    return ArbitrageBot(config, connectors, md, scanner, executor, risk,
+                        trade_logger, notifier=notifier)
 
 
 def _install_ws_noise_filter(log) -> None:
@@ -99,6 +102,17 @@ async def _run(args) -> None:
         level=config.logging.get("level", "INFO"),
     )
     _install_ws_noise_filter(log)
+    # Быстрая проверка Telegram: отправить тестовое сообщение и выйти.
+    if getattr(args, "test_telegram", False):
+        notifier = build_notifier(config.telegram)
+        if notifier is None or not notifier.enabled:
+            log.error("Telegram выключен или не заданы TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID в .env")
+            return
+        ok = await notifier.send(
+            f"🤖 {notifier.app_name}\n✅ Проверка связи — уведомления работают!")
+        log.info("Тестовое сообщение отправлено: %s", ok)
+        return
+
     enabled = list(config.enabled_exchanges.keys())
     log.info("Старт. dry_run=%s testnet=%s биржи=%s", config.dry_run, config.testnet, enabled)
     if not enabled:
@@ -130,6 +144,8 @@ def main() -> None:
                         help="число итераций цикла (по умолчанию бесконечно)")
     parser.add_argument("--interval", type=float, default=1.0, help="пауза между итерациями, сек")
     parser.add_argument("--rest", action="store_true", help="использовать REST вместо WS")
+    parser.add_argument("--test-telegram", action="store_true",
+                        help="отправить тестовое сообщение в Telegram и выйти")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)

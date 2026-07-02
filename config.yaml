@@ -139,3 +139,11 @@ logging:
   app_log: logs/app.log
   trades_log: logs/trades.jsonl   # машиночитаемый лог сделок (jsonl | csv)
   level: INFO
+
+# --- Уведомления в Telegram ---------------------------------------------
+telegram:
+  enabled: true
+  token_env: TELEGRAM_BOT_TOKEN   # имена переменных в .env (сами токены — там)
+  chat_id_env: TELEGRAM_CHAT_ID
+  app_name: "Арбитраж-бот"        # метка в каждом сообщении, чтобы отличать от
+                                  # статистики других ботов в том же чате

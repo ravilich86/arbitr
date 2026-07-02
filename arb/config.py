@@ -50,6 +50,7 @@ class Config:
     allow_list: list[str] = field(default_factory=list)
     deny_list: list[str] = field(default_factory=list)
     logging: dict[str, Any] = field(default_factory=dict)
+    telegram: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -103,6 +104,14 @@ def load_config(
 
     deny = [d for d in (data.get("deny_list") or []) if d]
 
+    tg = data.get("telegram") or {}
+    telegram = {
+        "enabled": bool(tg.get("enabled", False)),
+        "token": _resolve_secret(tg.get("token_env")),
+        "chat_id": _resolve_secret(tg.get("chat_id_env")),
+        "app_name": tg.get("app_name", "Арбитраж-бот"),
+    }
+
     return Config(
         dry_run=bool(data.get("dry_run", True)),
         testnet=bool(data.get("testnet", False)),
@@ -114,5 +123,6 @@ def load_config(
         allow_list=list(data.get("allow_list") or []),
         deny_list=deny,
         logging=data.get("logging", {}) or {},
+        telegram=telegram,
         raw=data,
     )
