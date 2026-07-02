@@ -4,6 +4,7 @@ import pytest
 
 from arb.exchanges import (
     ExchangeConnector,
+    extract_delist_time,
     filter_perp_markets,
     is_usdt_perp,
     market_to_contract,
@@ -72,3 +73,21 @@ async def test_connector_close():
     conn = ExchangeConnector("binance", client)
     await conn.close()
     assert client.closed is True
+
+
+def test_extract_delist_time_from_info():
+    m = make_market("FOO/USDT:USDT", "FOO")
+    m["info"] = {"deliveryTime": 1_700_000_000_000}
+    assert extract_delist_time(m) == 1_700_000_000_000
+
+
+def test_extract_delist_time_ignores_far_future_sentinel():
+    m = make_market("FOO/USDT:USDT", "FOO")
+    # Binance-подобный сентинел ~2100 год -> это бессрочный перп, не делистинг
+    m["info"] = {"deliveryDate": 4_133_404_800_000}
+    assert extract_delist_time(m) is None
+
+
+def test_extract_delist_time_none_when_absent():
+    m = make_market("FOO/USDT:USDT", "FOO")
+    assert extract_delist_time(m) is None

@@ -17,11 +17,21 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
+from typing import Optional
 
 from .models import Candidate, ContractMeta
 
 logger = logging.getLogger(__name__)
+
+
+def is_delisting_soon(meta: ContractMeta, now_ms: float, horizon_days: float) -> bool:
+    """Скоро ли контракт делистится/поставляется (в пределах horizon_days)."""
+    if not meta.delist_time or horizon_days <= 0:
+        return False
+    horizon_ms = horizon_days * 24 * 3600 * 1000
+    return meta.delist_time - now_ms <= horizon_ms
 
 
 @dataclass
@@ -31,6 +41,7 @@ class UniverseResult:
     candidates: dict[str, Candidate] = field(default_factory=dict)
     suspicious: dict[str, list[str]] = field(default_factory=dict)  # symbol -> причины
     single_exchange: list[str] = field(default_factory=list)        # только 1 биржа
+    delisting: list[str] = field(default_factory=list)              # исключены из-за делистинга
 
     @property
     def symbols(self) -> list[str]:
@@ -67,6 +78,8 @@ def build_universe(
     min_exchanges: int = 2,
     max_contract_size_ratio: float | None = None,
     drop_suspicious: bool = True,
+    skip_delisting_days: float = 0.0,
+    now_ms: Optional[float] = None,
 ) -> UniverseResult:
     """Построить матрицу тождественных пар (§4).
 
@@ -87,6 +100,9 @@ def build_universe(
     """
     allow = {s.upper() for s in (allow_list or [])}
     deny = {s.upper() for s in (deny_list or [])}
+    cur_ms = now_ms if now_ms is not None else time.time() * 1000
+    result = UniverseResult()
+    delisting_set: set[str] = set()
 
     # 1. Собрать матрицу symbol -> {exchange -> meta}
     matrix: dict[str, dict[str, ContractMeta]] = {}
@@ -97,9 +113,12 @@ def build_universe(
                 continue
             if allow and key not in allow:
                 continue
+            # Пропускаем ногу, которая скоро делистится — арбитраж по ней небезопасен.
+            if is_delisting_soon(meta, cur_ms, skip_delisting_days):
+                delisting_set.add(key)
+                logger.info("Пропуск %s на %s: скоро делистинг", key, exchange)
+                continue
             matrix.setdefault(key, {})[exchange] = meta
-
-    result = UniverseResult()
 
     # 2. Отфильтровать по числу бирж и проверить на коллизии
     for symbol, contracts in matrix.items():
@@ -128,4 +147,5 @@ def build_universe(
         result.candidates[symbol] = Candidate(symbol=symbol, contracts=dict(contracts))
 
     result.single_exchange.sort()
+    result.delisting = sorted(delisting_set)
     return result

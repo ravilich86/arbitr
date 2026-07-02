@@ -64,6 +64,34 @@ def is_usdt_perp(market: dict) -> bool:
     return True
 
 
+# Дальняя граница: значения времени поставки за этим горизонтом считаем «вечными»
+# сентинелами перпа (напр. Binance deliveryDate ≈ 4133404800000 = ~2100 год), не делистингом.
+_FAR_FUTURE_MS = 2_500_000_000_000  # ~ год 2049; всё дальше — сентинел бессрочного перпа
+
+
+def extract_delist_time(market: dict) -> Optional[float]:
+    """Best-effort извлечение времени делистинга/поставки контракта (unix ms).
+
+    Перпы обычно бессрочны, но при анонсе делистинга биржи проставляют дату
+    поставки/делистинга. Поля различаются по биржам, поэтому проверяем несколько
+    типичных вариантов. Далёкие сентинелы (год ~2100) игнорируем.
+    """
+    candidates: list = []
+    expiry = market.get("expiry")
+    if expiry:
+        candidates.append(expiry)
+    info = market.get("info") or {}
+    if isinstance(info, dict):
+        for key in ("delistTime", "deliveryTime", "deliveryDate", "settleTime",
+                    "delivery_time", "delist_time"):
+            val = info.get(key)
+            fv = _to_float(val)
+            if fv:
+                candidates.append(fv)
+    valid = [c for c in candidates if 0 < c < _FAR_FUTURE_MS]
+    return min(valid) if valid else None
+
+
 def market_to_contract(exchange: str, market: dict) -> ContractMeta:
     """Преобразовать ccxt market в ContractMeta (§3)."""
     base = market.get("base", "")
@@ -82,6 +110,7 @@ def market_to_contract(exchange: str, market: dict) -> ContractMeta:
         max_leverage=_to_float(_safe_get(market, "limits", "leverage", "max")),
         contract_size=_to_float(market.get("contractSize")),
         funding_interval_hours=None,  # заполняется на Этапе 3 (§5) через fetch_funding_rate
+        delist_time=extract_delist_time(market),
     )
 
 

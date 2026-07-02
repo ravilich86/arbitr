@@ -58,6 +58,7 @@ class ContractMeta:
     max_leverage: Optional[float] = None   # макс. доступное плечо
     contract_size: Optional[float] = None  # размер контракта (для сверки коллизий, §4)
     funding_interval_hours: Optional[float] = None  # период начисления funding (не хардкодить 8ч)
+    delist_time: Optional[float] = None    # время делистинга/поставки (unix ms), если анонсировано
 
     def key(self) -> str:
         """Единый ключ актива для сопоставления между биржами."""

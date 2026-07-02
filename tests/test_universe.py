@@ -75,3 +75,36 @@ def test_small_difference_kept_with_threshold():
     # 10x < 50x -> в пределах порога, пара остаётся
     res = build_universe(_pair_with_sizes(1.0, 10.0), max_contract_size_ratio=50.0)
     assert "FOO/USDT" in res.candidates
+
+
+def test_delisting_leg_excluded():
+    now_ms = 1_000_000_000_000
+    soon = now_ms + 1 * 24 * 3600 * 1000       # через 1 день
+    far = now_ms + 30 * 24 * 3600 * 1000       # через 30 дней
+    contracts = {
+        "binance": {"FOO/USDT": ContractMeta("binance", "FOO/USDT", "FOO/USDT:USDT",
+                                             "FOO", "USDT", delist_time=soon)},
+        "bybit": {"FOO/USDT": ContractMeta("bybit", "FOO/USDT", "FOO/USDT:USDT",
+                                           "FOO", "USDT", delist_time=None)},
+        "okx": {"FOO/USDT": ContractMeta("okx", "FOO/USDT", "FOO/USDT:USDT",
+                                         "FOO", "USDT", delist_time=far)},
+    }
+    res = build_universe(contracts, skip_delisting_days=3, now_ms=now_ms)
+    # нога binance делистится через 1 день (<3) -> исключается; остаются bybit+okx
+    assert "FOO/USDT" in res.candidates
+    assert set(res.candidates["FOO/USDT"].exchanges) == {"bybit", "okx"}
+    assert "FOO/USDT" in res.delisting
+
+
+def test_delisting_drops_pair_below_min_exchanges():
+    now_ms = 1_000_000_000_000
+    soon = now_ms + 1 * 24 * 3600 * 1000
+    contracts = {
+        "binance": {"FOO/USDT": ContractMeta("binance", "FOO/USDT", "FOO/USDT:USDT",
+                                             "FOO", "USDT", delist_time=soon)},
+        "bybit": {"FOO/USDT": ContractMeta("bybit", "FOO/USDT", "FOO/USDT:USDT",
+                                           "FOO", "USDT", delist_time=None)},
+    }
+    res = build_universe(contracts, skip_delisting_days=3, now_ms=now_ms)
+    # binance выбывает -> остаётся 1 биржа -> не кандидат
+    assert "FOO/USDT" not in res.candidates

@@ -58,6 +58,9 @@ class ArbitrageBot:
         self.open_positions: list[Position] = []
         # Историческая сверка тождественности при большом текущем спреде
         self.history_cfg = (config.raw.get("history") or {}) if config.raw else {}
+        # WS-стриминг
+        self._running = False
+        self._stream_tasks: list = []
 
     # ---- построение вселенной (§3–4) ----
     async def refresh_universe(self) -> None:
@@ -70,10 +73,14 @@ class ArbitrageBot:
             allow_list=self.config.allow_list,
             deny_list=self.config.deny_list,
             max_contract_size_ratio=universe_cfg.get("max_contract_size_ratio"),
+            skip_delisting_days=universe_cfg.get("skip_delisting_days", 0.0),
         )
         self.candidates = res.candidates
-        logger.info("Вселенная: %d кандидатов, %d подозрительных, %d single-exchange",
-                    len(res.candidates), len(res.suspicious), len(res.single_exchange))
+        logger.info(
+            "Вселенная: %d кандидатов, %d подозрительных, %d single-exchange, %d делистинг",
+            len(res.candidates), len(res.suspicious), len(res.single_exchange),
+            len(res.delisting),
+        )
 
     # ---- обновление котировок/funding (§5) ----
     async def refresh_market_data(self, use_ws: bool = True) -> None:
@@ -142,7 +149,10 @@ class ArbitrageBot:
         if len(active) >= self.risk.max_concurrent_positions:
             return
 
-        best = None
+        # Собираем ВСЕ проходящие сигналы и сортируем по убыванию чистого спреда.
+        # Перебор (а не только «лучший») нужен, потому что верхний сигнал может не
+        # пройти историческую сверку/риск — тогда берём следующий подходящий.
+        signals = []
         for symbol, cand in self.candidates.items():
             quotes = {ex: q for ex in cand.exchanges
                       if (q := self.md.get_quote(ex, symbol)) is not None}
@@ -151,60 +161,66 @@ class ArbitrageBot:
             funding = {ex: f for ex in cand.exchanges
                        if (f := self.md.get_funding(ex, symbol)) is not None}
             sig = self.scanner.scan_symbol(symbol, quotes, funding, now=now)
-            if sig and (best is None or sig.net_spread > best.net_spread):
-                best = sig
+            if sig:
+                signals.append(sig)
+        signals.sort(key=lambda s: s.net_spread, reverse=True)
 
-        if best is None:
-            return
+        max_check = int((self.history_cfg or {}).get("max_candidates_check", 10))
+        for sig in signals[:max_check]:
+            margin_required = sig.notional / max(self.risk.leverage, 1)
+            free_margin = self._free_margin(sig.exchange_high, sig.exchange_low)
+            decision = self.risk.can_open(
+                sig.symbol, self.open_positions, margin_required, free_margin,
+                (sig.exchange_high, sig.exchange_low), now,
+            )
+            if not decision.allowed:
+                logger.info("Сигнал %s отклонён риском: %s", sig.symbol, decision.reason)
+                continue
 
-        margin_required = best.notional / max(self.risk.leverage, 1)
-        free_margin = self._free_margin(best.exchange_high, best.exchange_low)
-        decision = self.risk.can_open(
-            best.symbol, self.open_positions, margin_required, free_margin,
-            (best.exchange_high, best.exchange_low), now,
-        )
-        if not decision.allowed:
+            # Обязательная историческая сверка «было вместе -> сейчас разошлось».
+            hist_ok, hist_reason = await self._history_check(sig, now)
+            if not hist_ok:
+                logger.info("Сигнал %s отклонён историей: %s", sig.symbol, hist_reason)
+                continue
+
+            mode = "DRY-RUN" if self.config.dry_run else "LIVE"
+            logger.info("[%s] Вход %s: H=%s L=%s raw=%.4f net=%.4f",
+                        mode, sig.symbol, sig.exchange_high, sig.exchange_low,
+                        sig.raw_spread, sig.net_spread)
+            pos = await self.executor.open_position(sig)
+            pos.open_time = now  # единый источник времени для расчёта удержания
+            if pos.status == PositionStatus.OPEN:
+                self.open_positions.append(pos)
+                return  # вошли — на этой итерации больше не открываем
+            logger.warning("Вход %s не состоялся: %s", sig.symbol, pos.close_reason)
+
+        if signals:
             self.summary.record_skip()
-            logger.info("Сигнал %s отклонён риском: %s", best.symbol, decision.reason)
-            return
-
-        # Историческая сверка тождественности при большом текущем спреде
-        hist_ok, hist_reason = await self._history_check(best, now)
-        if not hist_ok:
-            self.summary.record_skip()
-            logger.info("Сигнал %s отклонён историей: %s", best.symbol, hist_reason)
-            return
-
-        mode = "DRY-RUN" if self.config.dry_run else "LIVE"
-        logger.info("[%s] Вход %s: H=%s L=%s raw=%.4f net=%.4f",
-                    mode, best.symbol, best.exchange_high, best.exchange_low,
-                    best.raw_spread, best.net_spread)
-        pos = await self.executor.open_position(best)
-        pos.open_time = now  # единый источник времени для расчёта удержания
-        if pos.status == PositionStatus.OPEN:
-            self.open_positions.append(pos)
-        else:
-            self.summary.record_skip()
-            logger.warning("Вход %s не состоялся: %s", best.symbol, pos.close_reason)
 
     async def _history_check(self, signal, now: float) -> tuple[bool, Optional[str]]:
-        """Сверка тождественности активов по дневным свечам при большом спреде.
+        """Вход «было вместе -> сейчас разошлось» (по требованию).
 
-        Логика (по требованию): если текущий сырой спред превышает check_spread
-        (напр. 1%), сверяем минимумы/максимумы цены обеих ног за последние N дней
-        на дневных свечах. Если исторические уровни расходятся не более чем на
-        max_divergence (напр. 0.3%) — это один и тот же актив, пару берём в работу.
-        Иначе (или если данных нет) — пропускаем: скорее всего разные активы или
-        нестабильная пара.
+        Берём пару в работу, только если ОБА условия выполнены:
+          1) сейчас разошлось: текущий сырой спред >= check_spread (напр. 1%);
+          2) исторически шли вместе: за последние N дней на дневных свечах
+             минимумы/максимумы цены обеих ног расходятся не более чем на
+             max_divergence (напр. 0.3%) — значит это один и тот же актив.
 
-        Если проверка выключена или спред невелик — всегда True (не мешаем).
+        Если require_divergence=True (по умолчанию), сверка ОБЯЗАТЕЛЬНА для всех
+        входов: пара с текущим спредом ниже check_spread или без исторических
+        данных отклоняется. Если проверка выключена (enabled=false) — всегда True.
         """
         cfg = self.history_cfg
         if not cfg or not cfg.get("enabled", False):
             return True, None
         check_spread = cfg.get("check_spread", 0.01)
-        if signal.raw_spread <= check_spread:
-            return True, None  # спред невелик — историческая сверка не нужна
+        require = cfg.get("require_divergence", True)
+        if signal.raw_spread < check_spread:
+            # ещё не разошлось до порога
+            if require:
+                return False, (f"текущий спред {signal.raw_spread:.4f} < {check_spread} "
+                               "(пара ещё не разошлась)")
+            return True, None
 
         timeframe = cfg.get("timeframe", "1d")
         days = int(cfg.get("days", 10))
@@ -233,18 +249,97 @@ class ArbitrageBot:
         cap = self.risk.max_position_per_exchange
         return {ex: cap for ex in exchanges}
 
+    # ---- WS-стриминг ----
+    async def _stream_quotes(self, exchange: str, symbol: str) -> None:
+        """Фоновый стрим стакана по (биржа, символ): watch_order_book в цикле.
+
+        watch_order_book сам ждёт следующего апдейта, поэтому цикл паузится
+        естественно. Ошибки/разрывы логируем и переподключаемся с backoff.
+        """
+        backoff = 1.0
+        while self._running:
+            try:
+                await self.md.update_quote(exchange, symbol, use_ws=True)
+                backoff = 1.0
+                # Гарантированно уступаем управление циклу событий: даже если
+                # watch вернулся мгновенно, не монополизируем поток (и позволяем
+                # доставить отмену задачи при остановке).
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - разрыв WS/ошибка биржи
+                logger.warning("WS %s %s: %s", exchange, symbol, exc)
+                await asyncio.sleep(min(backoff, 30.0))
+                backoff *= 2
+
+    async def _funding_loop(self, interval: float) -> None:
+        """Периодически обновляет funding по всем кандидатам (меняется медленно)."""
+        while self._running:
+            tasks = [self.md.update_funding(ex, symbol)
+                     for symbol, cand in self.candidates.items()
+                     for ex in cand.exchanges]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(interval)
+
+    async def start_streams(self, funding_interval: float = 300.0) -> None:
+        """Запустить фоновые WS-стримы котировок + периодический funding."""
+        self._running = True
+        self._stream_tasks = []
+        for symbol, cand in self.candidates.items():
+            for ex in cand.exchanges:
+                self._stream_tasks.append(
+                    asyncio.create_task(self._stream_quotes(ex, symbol)))
+        self._stream_tasks.append(
+            asyncio.create_task(self._funding_loop(funding_interval)))
+        logger.info("Запущено WS-стримов: %d", len(self._stream_tasks) - 1)
+
+    async def stop_streams(self) -> None:
+        self._running = False
+        for t in self._stream_tasks:
+            t.cancel()
+        if self._stream_tasks:
+            await asyncio.gather(*self._stream_tasks, return_exceptions=True)
+        self._stream_tasks = []
+
     # ---- главный цикл ----
     async def run(self, iterations: Optional[int] = None, interval: float = 1.0,
-                  use_ws: bool = True) -> None:
+                  use_ws: bool = True, warmup: float = 5.0,
+                  funding_interval: float = 300.0) -> None:
         await self.refresh_universe()
+        if use_ws:
+            await self._run_streaming(iterations, interval, warmup, funding_interval)
+        else:
+            await self._run_rest(iterations, interval)
+        logger.info(self.summary.render())
+
+    async def _run_streaming(self, iterations, interval, warmup, funding_interval) -> None:
+        """Цикл на WS: стримы в фоне непрерывно освежают кэш, цикл сканирует кэш."""
+        await self.start_streams(funding_interval)
+        try:
+            if warmup:
+                await asyncio.sleep(warmup)  # дать стримам наполнить кэш
+            i = 0
+            while iterations is None or i < iterations:
+                if self.risk.killed and not self.open_positions:
+                    logger.info("Kill-switch: открытых позиций нет — стоп")
+                    break
+                await self.poll_once()
+                i += 1
+                if iterations is None or i < iterations:
+                    await asyncio.sleep(interval)
+        finally:
+            await self.stop_streams()
+
+    async def _run_rest(self, iterations, interval) -> None:
+        """Цикл на REST: перед каждым проходом обходим биржи запросами (медленно)."""
         i = 0
         while iterations is None or i < iterations:
             if self.risk.killed and not self.open_positions:
-                logger.info("Kill-switch: новых сделок нет, открытых позиций нет — стоп")
+                logger.info("Kill-switch: открытых позиций нет — стоп")
                 break
-            await self.refresh_market_data(use_ws=use_ws)
+            await self.refresh_market_data(use_ws=False)
             await self.poll_once()
             i += 1
             if iterations is None or i < iterations:
                 await asyncio.sleep(interval)
-        logger.info(self.summary.render())

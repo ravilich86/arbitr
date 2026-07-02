@@ -1,5 +1,6 @@
 """Тесты оркестратора (§12): end-to-end dry_run прогон."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,7 @@ from arb.marketdata import MarketData
 from arb.models import Candidate, ContractMeta, PositionStatus, Quote
 from arb.risk import RiskManager
 from arb.scanner import Scanner
-from tests.fixtures import MockTradeClient
+from tests.fixtures import MockMarketClient, MockTradeClient
 
 
 def _meta(ex):
@@ -157,14 +158,26 @@ async def test_history_rejects_when_no_data(tmp_path):
     assert len(bot.open_positions) == 0
 
 
-async def test_history_not_triggered_for_small_spread(tmp_path):
+async def test_history_rejects_small_spread_when_required(tmp_path):
     bot = _bot(tmp_path)
-    # история включена, но данных нет; спред ~1% (не больше check_spread) -> сверка не нужна
-    _enable_history(bot, [], [])
-    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 101.0, 101.1, timestamp=0)
+    # сверка обязательна; текущий спред ~0.6% < check_spread(1%) -> ещё не разошлось
+    _enable_history(bot, _hist_candles(100.0, 110.0), _hist_candles(100.1, 110.1))
+    # спред ~0.9% (< check_spread 1%) -> ещё не разошлось
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 100.9, 101.0, timestamp=0)
     bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.9, 100.0, timestamp=0)
     await bot.poll_once(now=1000)
-    assert len(bot.open_positions) == 1  # вошли без исторической сверки
+    assert len(bot.open_positions) == 0  # не разошлось до порога -> не входим
+
+
+async def test_history_soft_mode_allows_small_spread(tmp_path):
+    bot = _bot(tmp_path)
+    # require_divergence=false: мелкий спред (~0.9%) проходит без исторической сверки
+    _enable_history(bot, [], [])
+    bot.history_cfg["require_divergence"] = False
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 100.9, 101.0, timestamp=0)
+    bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.9, 100.0, timestamp=0)
+    await bot.poll_once(now=1000)
+    assert len(bot.open_positions) == 1
 
 
 async def test_bot_cooldown_blocks_reentry(tmp_path):
@@ -183,3 +196,25 @@ async def test_bot_cooldown_blocks_reentry(tmp_path):
     await bot.poll_once(now=1002)
     assert len(bot.open_positions) == 0
     assert bot.summary.skipped_signals >= 1
+
+
+async def test_ws_streams_populate_cache(tmp_path):
+    ob = {"bids": [[100.0, 5]], "asks": [[100.5, 4]], "timestamp": 1}
+    ch = ExchangeConnector("h", MockMarketClient(order_books={"BTC/USDT": ob}))
+    cl = ExchangeConnector("l", MockMarketClient(order_books={"BTC/USDT": ob}))
+    connectors = {"h": ch, "l": cl}
+    fees = {"h": 0.0005, "l": 0.0005}
+    bot = ArbitrageBot(
+        _config(tmp_path), connectors, MarketData(connectors),
+        Scanner(fees=fees), Executor(connectors, fees, dry_run=True),
+        RiskManager(), TradeLogger(str(tmp_path / "trades.jsonl")), SessionSummary(),
+    )
+    bot.candidates = {"BTC/USDT": Candidate("BTC/USDT", {"h": _meta("h"), "l": _meta("l")})}
+
+    await bot.start_streams(funding_interval=999)
+    await asyncio.sleep(0.05)          # дать стримам обновить кэш
+    await bot.stop_streams()
+
+    assert bot.md.get_quote("h", "BTC/USDT") is not None
+    assert bot.md.get_quote("l", "BTC/USDT").bid == 100.0
+    assert bot._stream_tasks == []     # задачи остановлены
