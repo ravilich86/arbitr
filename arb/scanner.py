@@ -200,6 +200,11 @@ class PersistenceTracker:
         start = self._since.setdefault(key, now)
         return now - start
 
+    def peek(self, key: tuple[str, str, str]) -> float:
+        """Текущая длительность удержания без изменения состояния."""
+        start = self._since.get(key)
+        return (self._clock() - start) if start is not None else 0.0
+
     def reset(self, key: tuple[str, str, str]) -> None:
         self._since.pop(key, None)
 
@@ -291,8 +296,12 @@ class Scanner:
         funding_low: Optional[FundingInfo] = None,
         est_slippage: Optional[float] = None,
         now: Optional[float] = None,
+        track_persistence: bool = True,
     ) -> PairEvaluation:
-        """Оценить пару (H=short, L=long) и решить, проходит ли фильтры (§6)."""
+        """Оценить пару (H=short, L=long) и решить, проходит ли фильтры (§6).
+
+        track_persistence=False — не менять состояние persistence (для диагностики).
+        """
         reasons: list[str] = []
         bid_h = quote_high.bid
         ask_l = quote_low.ask
@@ -334,7 +343,9 @@ class Scanner:
                 reasons.append("не хватает глубины стакана (вход/выход)")
         # Фильтр 5: устойчивость расхождения (persistence)
         above = self.min_gross_spread <= raw <= self.max_gross_spread and net >= self.min_net_spread
-        held = self.persistence.update((symbol, high, low), above)
+        key = (symbol, high, low)
+        held = (self.persistence.update(key, above) if track_persistence
+                else self.persistence.peek(key))
         if above and held < self.min_spread_persistence:
             reasons.append(f"persistence<{self.min_spread_persistence}s(={held:.1f})")
 

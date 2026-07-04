@@ -599,11 +599,22 @@ class ArbitrageBot:
                     if r > best:
                         best, bh, bl = r, h, l
             if bh:
-                spreads.append((best, symbol, bh, bl))
-        spreads.sort(reverse=True)
-        top = "; ".join(f"{s} {r*100:.2f}% ({h}->{l})" for r, s, h, l in spreads[:5]) or "—"
+                spreads.append((best, symbol, bh, bl, quotes))
+        spreads.sort(key=lambda x: x[0], reverse=True)
+
+        # Для топ-спредов показываем, ПОЧЕМУ они не входят (какой фильтр отсёк).
+        parts = []
+        for r, symbol, h, l, quotes in spreads[:5]:
+            ev = self.scanner.evaluate_pair(
+                symbol, h, l, quotes[h], quotes[l],
+                self.md.get_funding(h, symbol), self.md.get_funding(l, symbol),
+                now=now, track_persistence=False,
+            )
+            status = "ВХОД ✓" if ev.passed else "; ".join(ev.reasons)
+            parts.append(f"{symbol} {r*100:.2f}% ({h}->{l}) [{status}]")
+        top = " | ".join(parts) or "—"
         cov = f"{fresh_pairs}/{len(self.candidates)}"
-        logger.info("Диагностика: пар с котировками на ≥2 биржах: %s | топ спреды: %s",
+        logger.info("Диагностика: пар с котировками на ≥2 биржах: %s\n  топ: %s",
                     cov, top)
 
     # ---- главный цикл ----

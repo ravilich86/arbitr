@@ -381,6 +381,20 @@ def test_log_diagnostics_runs(tmp_path, caplog):
     assert "BTC/USDT" in text  # пара с расхождением попала в топ
 
 
+def test_diagnostics_shows_rejection_reason(tmp_path, caplog):
+    import logging
+    bot = _bot(tmp_path)
+    # спред ~2%, но объёма верхушки стакана не хватает под ~$2000 -> фильтр глубины
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 102.0, 102.1,
+                                             bid_volume=0.001, ask_volume=0.001, timestamp=None)
+    bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.9, 100.0,
+                                             bid_volume=0.001, ask_volume=0.001, timestamp=None)
+    with caplog.at_level(logging.INFO, logger="arb.bot"):
+        bot.log_diagnostics(now=1000)
+    text = " ".join(r.message for r in caplog.records)
+    assert "глубины" in text  # видно причину, почему не входим
+
+
 async def test_ws_degrades_to_orderbook_when_bbo_unsupported(tmp_path):
     # MEXC-случай: watch_bids_asks/tickers не поддержаны для перпов -> стакан
     ob = {"bids": [[100.0, 5]], "asks": [[100.5, 4]], "timestamp": 1}
