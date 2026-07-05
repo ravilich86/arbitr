@@ -46,6 +46,7 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
         hold_hours=rk.get("max_hold_time", 3600) / 3600.0,
         max_gross_spread=sp.get("max_gross_spread", 0.05),
         max_quote_age_ms=sp.get("max_quote_age_ms"),
+        filters=config.raw.get("filters", {}) or {},
         persistence=PersistenceTracker(),
     )
 

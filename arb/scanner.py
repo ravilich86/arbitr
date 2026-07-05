@@ -240,6 +240,7 @@ class Scanner:
         max_gross_spread: float = 0.05,
         max_quote_age_ms: Optional[float] = None,
         check_top_depth: bool = True,
+        filters: Optional[dict] = None,
         persistence: Optional[PersistenceTracker] = None,
     ):
         self.fees = fees
@@ -250,6 +251,13 @@ class Scanner:
         self.notional_target = notional_target
         self.hold_hours = hold_hours
         self.default_funding_interval_hours = default_funding_interval_hours
+        # Переключатели доп-фильтров (базовые критерии — сырой порог и история —
+        # действуют всегда). Позволяют упростить вход, отключив «тяжёлые» проверки.
+        default_filters = {
+            "net_spread": True, "top_depth": True, "persistence": True,
+            "max_gross_spread": True, "quote_age": True,
+        }
+        self.filters = {**default_filters, **(filters or {})}
         # Верхняя граница сырого спреда: расхождение выше почти всегда означает
         # ошибку данных (устаревшая котировка / пустой стакан / разные единицы),
         # а не исполнимый арбитраж — такие сигналы отсекаем (защита от фантомов).
@@ -322,31 +330,34 @@ class Scanner:
             notional=self.notional_target, timestamp=now,
         )
 
-        # Фильтр 0: sanity — устаревшие котировки и аномально большой спред.
-        if self._quote_stale(quote_high, now) or self._quote_stale(quote_low, now):
+        f = self.filters
+        # Фильтр 0: sanity — устаревшие котировки и аномально большой спред (опц.)
+        if f["quote_age"] and (self._quote_stale(quote_high, now)
+                               or self._quote_stale(quote_low, now)):
             reasons.append("устаревшая котировка")
-        if raw > self.max_gross_spread:
+        if f["max_gross_spread"] and raw > self.max_gross_spread:
             reasons.append(f"raw>{self.max_gross_spread} (вероятно ошибка данных)")
-        # Фильтр 1: сырой порог
+        # Фильтр 1: сырой порог — БАЗОВЫЙ критерий «сейчас разошлось», всегда.
         if raw < self.min_gross_spread:
             reasons.append(f"raw<{self.min_gross_spread}")
-        # Фильтр 2: чистый порог
-        if net < self.min_net_spread:
+        # Фильтр 2: чистый порог (опц.)
+        if f["net_spread"] and net < self.min_net_spread:
             reasons.append(f"net<{self.min_net_spread}")
-        # Фильтр 3: исполнимость по слиппеджу (если оценивали из стакана)
+        # Фильтр 3: исполнимость по слиппеджу из стакана (если оценивали)
         if est_slippage is not None and est_slippage > self.max_slippage:
             reasons.append(f"slippage>{self.max_slippage}")
-        # Фильтр 4: грубая проверка глубины верхушки стакана (вход и выход)
-        if self.check_top_depth:
+        # Фильтр 4: грубая проверка глубины верхушки стакана (вход и выход) (опц.)
+        if f["top_depth"] and self.check_top_depth:
             required_base = self.notional_target / ask_l if ask_l > 0 else 0.0
             if not self._top_depth_ok(required_base, quote_high, quote_low):
                 reasons.append("не хватает глубины стакана (вход/выход)")
-        # Фильтр 5: устойчивость расхождения (persistence)
-        above = self.min_gross_spread <= raw <= self.max_gross_spread and net >= self.min_net_spread
+        # Фильтр 5: устойчивость расхождения (persistence) (опц.)
+        # «Прошёл до persistence» = нет иных причин отклонения.
+        above = not reasons
         key = (symbol, high, low)
         held = (self.persistence.update(key, above) if track_persistence
                 else self.persistence.peek(key))
-        if above and held < self.min_spread_persistence:
+        if f["persistence"] and above and held < self.min_spread_persistence:
             reasons.append(f"persistence<{self.min_spread_persistence}s(={held:.1f})")
 
         passed = not reasons

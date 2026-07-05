@@ -189,6 +189,39 @@ def test_evaluate_pair_rejects_thin_book():
     assert any("глубины стакана" in r for r in ev.reasons)
 
 
+def test_filters_disable_depth():
+    s = _scanner(notional_target=2000.0, check_top_depth=True,
+                 filters={"top_depth": False})
+    qh = Quote("h", "BTC/USDT", 101.0, 101.1, bid_volume=0.001, ask_volume=0.001)
+    ql = Quote("l", "BTC/USDT", 99.9, 100.0, bid_volume=0.001, ask_volume=0.001)
+    ev = s.evaluate_pair("BTC/USDT", "h", "l", qh, ql)
+    assert ev.passed is True  # глубина не проверяется
+
+
+def test_filters_disable_net():
+    s = _scanner(min_net_spread=0.5, filters={"net_spread": False})  # порог заведомо велик
+    ev = s.evaluate_pair("BTC/USDT", "h", "l",
+                         q("h", "BTC/USDT", 101.0, 101.1),
+                         q("l", "BTC/USDT", 99.9, 100.0))
+    assert ev.passed is True  # чистый спред не проверяется
+
+
+def test_filters_disable_max_gross():
+    s = _scanner(max_gross_spread=0.05, filters={"max_gross_spread": False})
+    ev = s.evaluate_pair("X/USDT", "h", "l",
+                         q("h", "X/USDT", 107.6, 107.7),
+                         q("l", "X/USDT", 99.9, 100.0))
+    assert ev.passed is True  # спред 7.6% > 5%, но верхняя граница выключена
+
+
+def test_filters_default_all_on_still_rejects_thin():
+    s = _scanner(notional_target=2000.0, check_top_depth=True)
+    qh = Quote("h", "BTC/USDT", 101.0, 101.1, bid_volume=0.001, ask_volume=0.001)
+    ql = Quote("l", "BTC/USDT", 99.9, 100.0, bid_volume=0.001, ask_volume=0.001)
+    ev = s.evaluate_pair("BTC/USDT", "h", "l", qh, ql)
+    assert ev.passed is False  # по умолчанию всё включено — тонкий стакан отклоняется
+
+
 def test_evaluate_pair_passes_deep_book():
     s = _scanner(notional_target=2000.0, check_top_depth=True)
     # нужно ~20 базы при цене 100; объёмов достаточно
