@@ -23,7 +23,13 @@ from .marketdata import MarketData, parse_ticker
 from .models import Position, PositionStatus
 from .models import Candidate
 from .risk import RiskManager
-from .scanner import Scanner, candle_low_high, historical_price_divergence, raw_spread
+from .scanner import (
+    Scanner,
+    candle_low_high,
+    expected_net_funding,
+    historical_price_divergence,
+    raw_spread,
+)
 from .universe import build_universe
 
 
@@ -224,6 +230,8 @@ class ArbitrageBot:
                 logger.warning("Позиция %s: %s", pos.symbol, liq.reason)
 
             if exit_now:
+                # Начислить funding за время удержания (оценка) перед расчётом P&L.
+                pos.funding_accrued = self._accrued_funding(pos, hold)
                 await self.executor.close_position(pos, qh, ql, reason or "target")
                 self.risk.register_close(pos.symbol, now)
                 row = self.trade_logger.log_position(
@@ -236,6 +244,20 @@ class ArbitrageBot:
             else:
                 still_open.append(pos)
         self.open_positions = still_open
+
+    def _accrued_funding(self, pos: Position, hold_seconds: float) -> float:
+        """Оценка чистого funding за время удержания в USDT (§5).
+
+        Держим шорт на H и лонг на L: доход = funding_H*периодов − funding_L*периодов.
+        Оценка линейная по времени удержания (реально начисляется в дискретные
+        моменты, но для приближённого P&L этого достаточно). Знак: + получили, − заплатили.
+        """
+        fh = self.md.get_funding(pos.exchange_high, pos.symbol)
+        fl = self.md.get_funding(pos.exchange_low, pos.symbol)
+        hold_hours = max(0.0, hold_seconds / 3600.0)
+        income_frac = expected_net_funding(
+            fh, fl, hold_hours, self.scanner.default_funding_interval_hours)
+        return income_frac * pos.short_leg.notional
 
     # ---- скан и вход (§6–9) ----
     async def _scan_and_enter(self, now: float) -> None:

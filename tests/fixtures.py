@@ -138,6 +138,16 @@ class MockTradeClient:
         self.margin_calls.append((mode, symbol))
 
 
+class MockOrderBookClient:
+    """Мок клиента со стаканом для проверки VWAP-исполнения в dry_run."""
+
+    def __init__(self, bids, asks):
+        self.book = {"bids": bids, "asks": asks}
+
+    async def fetch_order_book(self, symbol, limit=50):
+        return self.book
+
+
 class FailingClient:
     """Клиент, у которого load_markets падает (имитация недоступной биржи)."""
 

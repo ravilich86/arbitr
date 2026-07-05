@@ -59,6 +59,8 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
         leg_timeout=ex_cfg.get("leg_timeout", 5.0),
         leverage=sz.get("leverage", 20),
         margin_mode=sz.get("margin_mode", "isolated"),
+        simulate_slippage=ex_cfg.get("simulate_slippage", True),
+        orderbook_limit=ex_cfg.get("orderbook_limit", 50),
     )
 
     risk = RiskManager(

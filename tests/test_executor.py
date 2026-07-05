@@ -3,9 +3,9 @@
 import pytest
 
 from arb.exchanges import ExchangeConnector
-from arb.executor import Executor, compute_base_amount, parse_order
+from arb.executor import Executor, compute_base_amount, parse_order, vwap_fill
 from arb.models import ArbSignal, ContractMeta, LegStatus, PositionStatus
-from tests.fixtures import MockTradeClient
+from tests.fixtures import MockOrderBookClient, MockTradeClient
 
 
 def meta(exchange, step=0.001, min_amount=0.001, min_notional=5.0):
@@ -64,6 +64,41 @@ def _connectors(behavior_h="fill", behavior_l="fill"):
 def _signal():
     return ArbSignal("BTC/USDT", "h", "l", bid_high=101.0, ask_low=100.0,
                      raw_spread=0.01, net_spread=0.005, notional=2000.0)
+
+
+def test_vwap_fill_full():
+    vwap, filled = vwap_fill([[100.0, 5], [101.0, 10]], base_amount=8)
+    assert filled == 8
+    assert vwap == pytest.approx((100.0 * 5 + 101.0 * 3) / 8)
+
+
+def test_vwap_fill_partial():
+    res = vwap_fill([[100.0, 3]], base_amount=8)
+    assert res is not None
+    vwap, filled = res
+    assert filled == 3 and vwap == 100.0
+
+
+def test_vwap_fill_empty():
+    assert vwap_fill([], 5) is None
+
+
+async def test_dry_run_slippage_from_orderbook():
+    # шорт на h идёт в bids (100.8), лонг на l — в asks (100.2); не в цену сигнала
+    ch = ExchangeConnector("h", MockOrderBookClient(bids=[[100.8, 1000]], asks=[[101.2, 1000]]))
+    cl = ExchangeConnector("l", MockOrderBookClient(bids=[[99.5, 1000]], asks=[[100.2, 1000]]))
+    ch.contracts = {"BTC/USDT": meta("h")}
+    cl.contracts = {"BTC/USDT": meta("l")}
+    conns = {"h": ch, "l": cl}
+    ex = Executor(conns, fees={"h": 0.0005, "l": 0.0005}, dry_run=True,
+                  simulate_slippage=True)
+    sig = ArbSignal("BTC/USDT", "h", "l", bid_high=101.0, ask_low=100.0,
+                    raw_spread=0.01, net_spread=0.005, notional=2000.0)
+    pos = await ex.open_position(sig)
+    assert pos.status == PositionStatus.OPEN
+    assert pos.short_leg.avg_price == 100.8   # из стакана, а не 101.0
+    assert pos.long_leg.avg_price == 100.2    # из стакана, а не 100.0
+    assert pos.short_leg.fee_paid > 0         # комиссия начислена
 
 
 async def test_open_position_dry_run():

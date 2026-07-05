@@ -126,6 +126,19 @@ async def test_bot_notifies_on_entry(tmp_path):
     assert any("entry BTC/USDT" in m for m in bot.notifier.sent)
 
 
+def test_accrued_funding(tmp_path):
+    from arb.models import FundingInfo, Leg, Position, Side
+    bot = _bot(tmp_path)
+    # шорт на H получает funding_H (положит.), лонг на L платит funding_L (тут 0)
+    bot.md.funding[("h", "BTC/USDT")] = FundingInfo("h", "BTC/USDT", 0.001, interval_hours=8)
+    bot.md.funding[("l", "BTC/USDT")] = FundingInfo("l", "BTC/USDT", 0.0, interval_hours=8)
+    s = Leg("h", "BTC/USDT", Side.SHORT, 20, filled_amount=20, avg_price=101.0)
+    l = Leg("l", "BTC/USDT", Side.LONG, 20, filled_amount=20, avg_price=100.0)
+    pos = Position("id", "BTC/USDT", "h", "l", s, l)
+    acc = bot._accrued_funding(pos, hold_seconds=8 * 3600)  # 1 период (8ч)
+    assert acc == pytest.approx(0.001 * 1 * 20 * 101.0)  # income_frac * нотионал шорта
+
+
 async def test_bot_opens_on_signal(tmp_path):
     bot = _bot(tmp_path)
     # расхождение: H дороже (bid 101), L дешевле (ask 100)

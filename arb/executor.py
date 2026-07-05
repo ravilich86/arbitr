@@ -84,6 +84,30 @@ def compute_base_amount(
 # --------------------------------------------------------------------------
 #  Парсинг ответа ордера ccxt
 # --------------------------------------------------------------------------
+def vwap_fill(levels: list, base_amount: float) -> Optional[tuple[float, float]]:
+    """Пройти по уровням стакана, набирая base_amount, вернуть (vwap, filled).
+
+    levels — уровни в направлении исполнения (asks для покупки, bids для продажи).
+    Если глубины не хватило, filled < base_amount (частичное исполнение).
+    None — если стакан пуст.
+    """
+    filled = 0.0
+    cost = 0.0
+    for lvl in levels or []:
+        price = float(lvl[0])
+        amt = float(lvl[1]) if len(lvl) > 1 else 0.0
+        take = min(amt, base_amount - filled)
+        if take <= 0:
+            continue
+        cost += take * price
+        filled += take
+        if filled >= base_amount:
+            break
+    if filled <= 0:
+        return None
+    return cost / filled, filled
+
+
 def parse_order(order: dict) -> dict:
     """Нормализовать ccxt-ответ ордера -> {filled, avg_price, id, status, fee}."""
     filled = order.get("filled") or 0.0
@@ -134,6 +158,8 @@ class Executor:
         leg_timeout: float = 5.0,
         leverage: int = 20,
         margin_mode: str = "isolated",
+        simulate_slippage: bool = True,
+        orderbook_limit: int = 50,
         clock=time.time,
     ):
         self.connectors = connectors
@@ -144,6 +170,10 @@ class Executor:
         self.leg_timeout = leg_timeout
         self.leverage = leverage
         self.margin_mode = margin_mode
+        # В dry_run исполнять по реальному стакану (слиппедж + частичное исполнение),
+        # а не по одной цене верхушки — чтобы P&L был ближе к реальному.
+        self.simulate_slippage = simulate_slippage
+        self.orderbook_limit = orderbook_limit
         self._clock = clock
 
     # ---- служебное ----
@@ -167,11 +197,16 @@ class Executor:
         fee_rate = self.fees.get(exchange, 0.0)
 
         if self.dry_run:
-            leg.filled_amount = amount
-            leg.avg_price = ref_price
+            fill_price, filled = ref_price, amount
+            if self.simulate_slippage:
+                sim = await self._simulate_fill(exchange, symbol, side, amount)
+                if sim is not None:
+                    fill_price, filled = sim
+            leg.filled_amount = filled
+            leg.avg_price = fill_price
             leg.order_id = f"dry-{uuid.uuid4().hex[:8]}"
-            leg.status = LegStatus.FILLED
-            leg.fee_paid = amount * ref_price * fee_rate
+            leg.status = LegStatus.FILLED if filled > 0 else LegStatus.FAILED
+            leg.fee_paid = filled * fill_price * fee_rate
             return leg
 
         client = self.connectors[exchange].client
@@ -200,6 +235,25 @@ class Executor:
             leg.error = str(exc)
             logger.error("Ошибка ноги %s %s: %s", exchange, symbol, exc)
         return leg
+
+    async def _simulate_fill(
+        self, exchange: str, symbol: str, side: Side, amount: float,
+    ) -> Optional[tuple[float, float]]:
+        """Оценить реальную цену исполнения по стакану (VWAP) для dry_run.
+
+        SHORT (продажа) идёт в bids, LONG (покупка) — в asks. Возвращает
+        (цена_исполнения, исполненный_объём) или None, если стакан недоступен.
+        """
+        client = self.connectors[exchange].client
+        if not hasattr(client, "fetch_order_book"):
+            return None
+        raw_symbol = self._raw_symbol(exchange, symbol)
+        try:
+            ob = await client.fetch_order_book(raw_symbol, self.orderbook_limit)
+        except Exception:  # noqa: BLE001 - недоступен стакан -> откат к ref-цене
+            return None
+        levels = ob.get("bids") if side == Side.SHORT else ob.get("asks")
+        return vwap_fill(levels or [], amount)
 
     async def _prepare_leverage(self, exchange: str, symbol: str, meta: ContractMeta) -> None:
         """Выставить плечо и режим маржи (§8). min(20, max_leverage биржи)."""
