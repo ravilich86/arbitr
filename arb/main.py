@@ -36,13 +36,16 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
     ex_cfg = config.execution
     rk = config.risk
 
+    # position_size переопределяет notional_target, если задан.
+    notional = sz.get("position_size") or sz.get("notional_target", 2000.0)
+
     scanner = Scanner(
         fees=fees,
         min_gross_spread=sp.get("min_gross_spread", 0.005),
         min_net_spread=sp.get("min_net_spread", 0.002),
         max_slippage=sz.get("max_slippage", 0.001),
         min_spread_persistence=sp.get("min_spread_persistence", 0.0),
-        notional_target=sz.get("notional_target", 2000.0),
+        notional_target=notional,
         hold_hours=rk.get("max_hold_time", 3600) / 3600.0,
         max_gross_spread=sp.get("max_gross_spread", 0.05),
         max_quote_age_ms=sp.get("max_quote_age_ms"),
