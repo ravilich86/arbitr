@@ -226,6 +226,59 @@ def build_ccxt_client(cfg: ExchangeConfig, testnet: bool = False) -> Any:
     return client
 
 
+def _representative_taker(fees: Any) -> Optional[float]:
+    """Из структуры fetch_trading_fees выбрать характерную taker-комиссию.
+
+    fees обычно {символ -> {'taker':..., 'maker':...}}. Берём самое частое
+    значение taker (для фьючерсов оно, как правило, плоское по аккаунту).
+    """
+    takers: list[float] = []
+    if isinstance(fees, dict):
+        for v in fees.values():
+            if isinstance(v, dict) and v.get("taker") is not None:
+                t = _to_float(v.get("taker"))
+                if t is not None:
+                    takers.append(t)
+    if not takers:
+        return None
+    from collections import Counter
+    return Counter(takers).most_common(1)[0][0]
+
+
+async def fetch_taker_fee(connector: "ExchangeConnector") -> Optional[float]:
+    """Актуальная taker-комиссия биржи (с учётом VIP-уровня аккаунта).
+
+    Порядок: аккаунтные fetch_trading_fees -> посимвольный fetch_trading_fee ->
+    дефолт из метаданных клиента. None, если ничего не удалось.
+    """
+    client = connector.client
+
+    if hasattr(client, "fetch_trading_fees"):
+        try:
+            fees = await client.fetch_trading_fees()
+            taker = _representative_taker(fees)
+            if taker is not None:
+                return taker
+        except Exception:  # noqa: BLE001
+            pass
+
+    if hasattr(client, "fetch_trading_fee") and connector.contracts:
+        raw_symbol = next(iter(connector.contracts.values())).raw_symbol
+        try:
+            f = await client.fetch_trading_fee(raw_symbol)
+            if isinstance(f, dict) and f.get("taker") is not None:
+                return _to_float(f.get("taker"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Дефолт из метаданных ccxt (не привязан к аккаунту).
+    try:
+        t = getattr(client, "fees", {}).get("trading", {}).get("taker")
+        return _to_float(t)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def create_connectors(config: Config) -> dict[str, ExchangeConnector]:
     """Создать коннекторы для всех включённых бирж (§3).
 

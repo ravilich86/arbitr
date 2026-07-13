@@ -66,8 +66,14 @@ cp .env.example .env      # заполнить реальными ключами
 ### `exchanges` — биржи
 
 По каждой: `enabled`, `api_key_env` / `api_secret_env` (+ `api_password_env` для
-OKX и Bitget), `taker_fee` (доля; **выставить реальную** — от неё зависит прибыль),
-`default_type: swap`.
+OKX и Bitget), `taker_fee` (доля), `default_type: swap`.
+
+### `fees` — комиссии
+
+- `fetch_from_exchange` — `true`: на старте бот тянет **актуальные taker-комиссии
+  с бирж** (`fetch_trading_fees`, учитывает VIP-уровень аккаунта) и использует их
+  в расчётах вместо конфига. При неудаче для конкретной биржи берётся её
+  `taker_fee` из секции `exchanges`. `false` — всегда значения из конфига.
 
 ### `spread` — пороги спреда и выхода
 

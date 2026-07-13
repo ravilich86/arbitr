@@ -4,13 +4,15 @@ import pytest
 
 from arb.exchanges import (
     ExchangeConnector,
+    _representative_taker,
     extract_delist_time,
+    fetch_taker_fee,
     filter_perp_markets,
     is_usdt_perp,
     market_to_contract,
     normalize_symbol,
 )
-from tests.fixtures import MockCCXTClient, binance_markets, make_market
+from tests.fixtures import MockCCXTClient, MockFeeClient, binance_markets, make_market
 
 
 def test_normalize_symbol():
@@ -91,3 +93,29 @@ def test_extract_delist_time_ignores_far_future_sentinel():
 def test_extract_delist_time_none_when_absent():
     m = make_market("FOO/USDT:USDT", "FOO")
     assert extract_delist_time(m) is None
+
+
+def test_representative_taker_picks_common():
+    fees = {
+        "BTC/USDT:USDT": {"taker": 0.0004, "maker": 0.0002},
+        "ETH/USDT:USDT": {"taker": 0.0004, "maker": 0.0002},
+        "WEIRD/USDT:USDT": {"taker": 0.001},
+    }
+    assert _representative_taker(fees) == 0.0004
+
+
+def test_representative_taker_none_when_empty():
+    assert _representative_taker({}) is None
+
+
+async def test_fetch_taker_fee_from_trading_fees():
+    client = MockFeeClient(trading_fees={"BTC/USDT:USDT": {"taker": 0.0003}})
+    conn = ExchangeConnector("binance", client)
+    assert await fetch_taker_fee(conn) == 0.0003
+
+
+async def test_fetch_taker_fee_default_fallback():
+    # нет fetch_trading_fees -> берём дефолт из метаданных клиента
+    client = MockFeeClient(trading_fees=None, default_taker=0.0006)
+    conn = ExchangeConnector("bybit", client)
+    assert await fetch_taker_fee(conn) == 0.0006

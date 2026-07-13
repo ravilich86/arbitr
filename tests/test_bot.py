@@ -126,6 +126,27 @@ async def test_bot_notifies_on_entry(tmp_path):
     assert any("entry BTC/USDT" in m for m in bot.notifier.sent)
 
 
+async def test_refresh_fees_from_exchange(tmp_path):
+    from tests.fixtures import MockFeeClient
+    bot = _bot(tmp_path)
+    # h отдаёт реальную комиссию, l — нет (останется из конфига)
+    bot.connectors["h"].client = MockFeeClient(trading_fees={"BTC/USDT:USDT": {"taker": 0.0003}})
+    bot.connectors["l"].client = MockFeeClient(trading_fees=None)  # не поддерживает
+    await bot.refresh_fees()
+    assert bot.scanner.fees["h"] == 0.0003     # подтянулась с биржи
+    assert bot.executor.fees["h"] == 0.0003
+    assert bot.scanner.fees["l"] == 0.0005     # осталась из конфига
+
+
+async def test_refresh_fees_disabled(tmp_path):
+    from tests.fixtures import MockFeeClient
+    bot = _bot(tmp_path)
+    bot.config.raw = {"fees": {"fetch_from_exchange": False}}
+    bot.connectors["h"].client = MockFeeClient(trading_fees={"BTC/USDT:USDT": {"taker": 0.0003}})
+    await bot.refresh_fees()
+    assert bot.scanner.fees["h"] == 0.0005     # не менялась (отключено)
+
+
 def test_accrued_funding(tmp_path):
     from arb.models import FundingInfo, Leg, Position, Side
     bot = _bot(tmp_path)

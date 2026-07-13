@@ -138,6 +138,20 @@ class MockTradeClient:
         self.margin_calls.append((mode, symbol))
 
 
+class MockFeeClient:
+    """Мок клиента для проверки подтягивания комиссий с биржи."""
+
+    def __init__(self, trading_fees=None, default_taker=None):
+        self._trading_fees = trading_fees
+        if default_taker is not None:
+            self.fees = {"trading": {"taker": default_taker}}
+
+    async def fetch_trading_fees(self):
+        if self._trading_fees is None:
+            raise RuntimeError("not supported")
+        return self._trading_fees
+
+
 class MockOrderBookClient:
     """Мок клиента со стаканом для проверки VWAP-исполнения в dry_run."""
 

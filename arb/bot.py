@@ -16,12 +16,11 @@ import logging
 from typing import Optional
 
 from .config import Config
-from .exchanges import ExchangeConnector
+from .exchanges import ExchangeConnector, fetch_taker_fee
 from .executor import Executor, current_spread, estimate_open_pnl, should_exit
 from .logger import SessionSummary, TradeLogger
 from .marketdata import MarketData, parse_ticker
-from .models import Position, PositionStatus
-from .models import Candidate
+from .models import Candidate, Position, PositionStatus
 from .risk import RiskManager
 from .scanner import (
     Scanner,
@@ -107,6 +106,30 @@ class ArbitrageBot:
             len(res.candidates), len(res.suspicious), len(res.single_exchange),
             len(res.delisting),
         )
+
+    # ---- актуальные комиссии с бирж ----
+    async def refresh_fees(self) -> None:
+        """Подтянуть реальные taker-комиссии с бирж (учёт VIP). Фолбэк — конфиг."""
+        fees_cfg = (self.config.raw.get("fees") or {})
+        if not fees_cfg.get("fetch_from_exchange", True):
+            return
+
+        async def one(name, conn):
+            try:
+                return name, await fetch_taker_fee(conn)
+            except Exception:  # noqa: BLE001
+                return name, None
+
+        results = await asyncio.gather(
+            *[one(n, c) for n, c in self.connectors.items()])
+        for name, taker in results:
+            if taker is not None:
+                self.scanner.fees[name] = taker
+                self.executor.fees[name] = taker
+                logger.info("Комиссия %s: taker=%.4f%% (с биржи)", name, taker * 100)
+            else:
+                cur = self.scanner.fees.get(name, 0.0)
+                logger.info("Комиссия %s: taker=%.4f%% (из конфига)", name, cur * 100)
 
     # ---- предфильтр вселенной по истории (10 дней, ≤0.3%) ----
     @staticmethod
@@ -646,6 +669,7 @@ class ArbitrageBot:
                   symbols_per_stream: int = 100, method: str = "auto",
                   stats_interval: float = 20.0) -> None:
         await self.refresh_universe()
+        await self.refresh_fees()
         await self.prequalify_universe(
             concurrency=int((self.history_cfg or {}).get("prefilter_concurrency", 20)))
         if self.notifier:
