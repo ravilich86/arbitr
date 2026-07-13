@@ -216,6 +216,26 @@ async def test_harvest_skips_when_no_profit(tmp_path):
     assert len(bot.open_positions) == 1  # держим — нечем крыть убыток
 
 
+async def test_failed_entry_sets_cooldown(tmp_path):
+    bot = _bot(tmp_path)
+
+    async def fake_open(sig):
+        from arb.models import Leg, Position, PositionStatus, Side
+        p = Position("x", sig.symbol, sig.exchange_high, sig.exchange_low,
+                     Leg(sig.exchange_high, sig.symbol, Side.SHORT, 1),
+                     Leg(sig.exchange_low, sig.symbol, Side.LONG, 1))
+        p.status = PositionStatus.FAILED
+        p.close_reason = "test-fail"
+        return p
+
+    bot.executor.open_position = fake_open
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 102.0, 102.1, timestamp=0)
+    bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.9, 100.0, timestamp=0)
+    await bot.poll_once(now=1000)
+    assert len(bot.open_positions) == 0
+    assert bot.risk.in_cooldown("BTC/USDT", now=1000) is True  # пара на cooldown
+
+
 async def test_bot_opens_on_signal(tmp_path):
     bot = _bot(tmp_path)
     # расхождение: H дороже (bid 101), L дешевле (ask 100)

@@ -451,7 +451,10 @@ class ArbitrageBot:
                         "open_time": pos.open_time,
                     })
                 return  # вошли — на этой итерации больше не открываем
-            logger.warning("Вход %s не состоялся: %s", sig.symbol, pos.close_reason)
+            # Не удалось войти — ставим пару на cooldown, чтобы не долбить её подряд.
+            self.risk.register_close(sig.symbol, now)
+            logger.warning("Вход %s не состоялся: %s (пара в cooldown)",
+                           sig.symbol, pos.close_reason)
 
         if signals:
             self.summary.record_skip()

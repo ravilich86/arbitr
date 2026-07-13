@@ -161,6 +161,26 @@ class MockFeeClient:
         return self._trading_fees
 
 
+class MockLeverageClient:
+    """Мок для проверки авто-подбора плеча и режима позиций.
+
+    set_leverage бросает 'Leverage X is not valid' при lev > max_leverage_ok.
+    """
+
+    def __init__(self, max_leverage_ok=5):
+        self.max_ok = max_leverage_ok
+        self.leverage_set = None
+        self.position_mode = None
+
+    async def set_leverage(self, lev, symbol=None):
+        if lev > self.max_ok:
+            raise RuntimeError(f"binance Leverage {lev} is not valid")
+        self.leverage_set = lev
+
+    async def set_position_mode(self, hedged, symbol=None):
+        self.position_mode = hedged
+
+
 class MockOrderBookClient:
     """Мок клиента со стаканом для проверки VWAP-исполнения в dry_run."""
 

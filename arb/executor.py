@@ -113,6 +113,17 @@ def compute_base_amount(
 # --------------------------------------------------------------------------
 #  Парсинг ответа ордера ccxt
 # --------------------------------------------------------------------------
+def _leverage_candidates(desired: int) -> list:
+    """Последовательность плеч для авто-подбора вниз: [desired, 10, 5, 4, 3, 2, 1]."""
+    seq = [desired, 10, 5, 4, 3, 2, 1]
+    out: list = []
+    for v in seq:
+        v = int(v)
+        if 1 <= v <= desired and v not in out:
+            out.append(v)
+    return out
+
+
 def vwap_fill(levels: list, base_amount: float) -> Optional[tuple[float, float]]:
     """Пройти по уровням стакана, набирая base_amount, вернуть (vwap, filled).
 
@@ -293,24 +304,50 @@ class Executor:
         return vwap_fill(levels or [], amount)
 
     async def _prepare_leverage(self, exchange: str, symbol: str, meta: ContractMeta) -> None:
-        """Выставить плечо и режим маржи (§8). min(20, max_leverage биржи)."""
+        """Подготовить биржу к входу: режим маржи, односторонний режим позиций,
+        плечо с авто-подбором вниз до допустимого (§8).
+
+        - режим маржи и режим позиций — best-effort (часть бирж/ccxt не поддерживает);
+        - плечо: пробуем желаемое (capped max_leverage), при отказе снижаем, пока
+          биржа не примет (мелкие монеты не дают 20x -> Binance -4028/-2027).
+        """
         if self.dry_run:
             return
         client = self.connectors[exchange].client
         raw_symbol = self._raw_symbol(exchange, symbol)
-        lev = self.leverage
-        if meta.max_leverage:
-            lev = int(min(self.leverage, meta.max_leverage))
-        try:
-            if hasattr(client, "set_margin_mode"):
+
+        # Режим маржи (best-effort; Gate и часть бирж не поддерживают в ccxt).
+        if hasattr(client, "set_margin_mode"):
+            try:
                 await client.set_margin_mode(self.margin_mode, raw_symbol)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("set_margin_mode %s: %s", exchange, exc)
-        try:
-            if hasattr(client, "set_leverage"):
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("set_margin_mode %s: %s", exchange, exc)
+
+        # Односторонний режим позиций (иначе Bybit: position idx not match).
+        if hasattr(client, "set_position_mode"):
+            try:
+                await client.set_position_mode(False, raw_symbol)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("set_position_mode %s: %s", exchange, exc)
+
+        # Плечо с авто-подбором вниз.
+        if not hasattr(client, "set_leverage"):
+            return
+        desired = int(min(self.leverage, meta.max_leverage or self.leverage))
+        for lev in _leverage_candidates(desired):
+            try:
                 await client.set_leverage(lev, raw_symbol)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("set_leverage %s: %s", exchange, exc)
+                if lev != desired:
+                    logger.info("Плечо %s %s: %dx (желаемое %dx недоступно)",
+                                exchange, symbol, lev, desired)
+                return
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc).lower()
+                if "leverage" in msg or "not valid" in msg or "-4028" in msg:
+                    continue  # пробуем меньшее плечо
+                logger.warning("set_leverage %s: %s", exchange, exc)
+                return
+        logger.warning("Не удалось установить плечо на %s %s", exchange, symbol)
 
     def plan_size(self, price: float, meta_high: ContractMeta,
                   meta_low: ContractMeta) -> tuple[float, float]:

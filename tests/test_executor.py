@@ -5,13 +5,14 @@ import pytest
 from arb.exchanges import ExchangeConnector
 from arb.executor import (
     Executor,
+    _leverage_candidates,
     compute_base_amount,
     compute_min_base,
     parse_order,
     vwap_fill,
 )
 from arb.models import ArbSignal, ContractMeta, LegStatus, PositionStatus
-from tests.fixtures import MockOrderBookClient, MockTradeClient
+from tests.fixtures import MockLeverageClient, MockOrderBookClient, MockTradeClient
 
 
 def meta(exchange, step=0.001, min_amount=0.001, min_notional=5.0):
@@ -137,6 +138,24 @@ async def test_dry_run_slippage_from_orderbook():
     assert pos.short_leg.avg_price == 100.8   # из стакана, а не 101.0
     assert pos.long_leg.avg_price == 100.2    # из стакана, а не 100.0
     assert pos.short_leg.fee_paid > 0         # комиссия начислена
+
+
+def test_leverage_candidates():
+    assert _leverage_candidates(20) == [20, 10, 5, 4, 3, 2, 1]
+    assert _leverage_candidates(5) == [5, 4, 3, 2, 1]
+    assert _leverage_candidates(3) == [3, 2, 1]
+
+
+async def test_prepare_leverage_steps_down():
+    from arb.exchanges import ExchangeConnector
+    client = MockLeverageClient(max_leverage_ok=5)  # 20 и 10 не примет, 5 — ок
+    conn = ExchangeConnector("binance", client)
+    conn.contracts = {"BTC/USDT": meta("binance")}
+    ex = Executor({"binance": conn}, fees={"binance": 0.0005}, dry_run=False,
+                  leverage=20)
+    await ex._prepare_leverage("binance", "BTC/USDT", meta("binance"))
+    assert client.leverage_set == 5       # подобралось вниз до допустимого
+    assert client.position_mode is False  # односторонний режим позиций
 
 
 async def test_open_position_dry_run():
