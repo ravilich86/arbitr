@@ -547,12 +547,14 @@ class ArbitrageBot:
         """Отправить уведомление с учётом политики (пункт 9).
 
         В боевом режиме (dry_run=false) при telegram.live_only_trades=true шлём
-        ТОЛЬКО события открытия/закрытия позиций; прочие (старт, баланс, аномалии,
-        диагностика) — не шлём. В dry_run шлём всё.
+        ТОЛЬКО события открытия/закрытия позиций и КРИТИЧНЫЕ алерты о балансе;
+        прочие (старт, аномалии, диагностика) — не шлём. В dry_run шлём всё.
         """
+        # Всегда шлём: сделки (entry/close) и баланс-алерт — важное исключение.
+        always = ("entry", "close", "balance")
         tg = self.config.telegram or {}
         live_only = tg.get("live_only_trades", True)
-        if not self.config.dry_run and live_only and category not in ("entry", "close"):
+        if not self.config.dry_run and live_only and category not in always:
             return
         self._notify(text)
 
