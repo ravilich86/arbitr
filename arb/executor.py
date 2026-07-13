@@ -47,6 +47,35 @@ def _floor_to_step(amount: float, step: Optional[float]) -> float:
     return math.floor(amount / step) * step
 
 
+def _ceil_to_step(amount: float, step: Optional[float]) -> float:
+    if not step or step <= 0:
+        return amount
+    return math.ceil(amount / step) * step
+
+
+def compute_min_base(
+    price: float, meta_high: ContractMeta, meta_low: ContractMeta,
+) -> float:
+    """Минимально возможный объём (база), удовлетворяющий минимумам ОБЕИХ бирж.
+
+    Берём максимум из min_amount и min_notional/цена по обеим биржам и округляем
+    ВВЕРХ под шаг лота (чтобы не упасть ниже минимума). Нужна крошечная маржа.
+    """
+    if price <= 0:
+        return 0.0
+    need = 0.0
+    for meta in (meta_high, meta_low):
+        if meta.min_amount:
+            need = max(need, meta.min_amount)
+        if meta.min_notional:
+            need = max(need, meta.min_notional / price)
+    if need <= 0:
+        need = max(meta_high.step_size or 0.0, meta_low.step_size or 0.0)
+    step = max(meta_high.step_size or 0.0, meta_low.step_size or 0.0)
+    amount = _ceil_to_step(need, step) if step > 0 else need
+    return amount
+
+
 def compute_base_amount(
     price: float,
     notional: float,
@@ -160,6 +189,9 @@ class Executor:
         margin_mode: str = "isolated",
         simulate_slippage: bool = True,
         orderbook_limit: int = 50,
+        sizing_mode: str = "notional",
+        notional_target: float = 2000.0,
+        position_size: Optional[float] = None,
         clock=time.time,
     ):
         self.connectors = connectors
@@ -170,6 +202,11 @@ class Executor:
         self.leg_timeout = leg_timeout
         self.leverage = leverage
         self.margin_mode = margin_mode
+        # Режим размера: 'notional' (по notional_target/position_size) или 'min'
+        # (минимально возможный объём под минимумы обеих бирж).
+        self.sizing_mode = sizing_mode
+        self.notional_target = notional_target
+        self.position_size = position_size
         # В dry_run исполнять по реальному стакану (слиппедж + частичное исполнение),
         # а не по одной цене верхушки — чтобы P&L был ближе к реальному.
         self.simulate_slippage = simulate_slippage
@@ -275,6 +312,16 @@ class Executor:
         except Exception as exc:  # noqa: BLE001
             logger.warning("set_leverage %s: %s", exchange, exc)
 
+    def plan_size(self, price: float, meta_high: ContractMeta,
+                  meta_low: ContractMeta) -> tuple[float, float]:
+        """Спланировать объём ноги: (base_amount, notional) по режиму sizing_mode."""
+        if self.sizing_mode == "min":
+            amount = compute_min_base(price, meta_high, meta_low)
+        else:
+            notional = self.position_size or self.notional_target
+            amount = compute_base_amount(price, notional, meta_high, meta_low)
+        return amount, amount * price
+
     # ---- вход двумя ногами ----
     async def open_position(self, signal: ArbSignal) -> Position:
         """Открыть позицию: SHORT на H и LONG на L конкурентно (§7)."""
@@ -284,7 +331,7 @@ class Executor:
         if meta_h is None or meta_l is None:
             raise ValueError(f"Нет метаданных контракта для {symbol}")
 
-        amount = compute_base_amount(signal.ask_low, signal.notional, meta_h, meta_l)
+        amount, _ = self.plan_size(signal.ask_low, meta_h, meta_l)
         pos = Position(
             id=uuid.uuid4().hex[:12], symbol=symbol,
             exchange_high=signal.exchange_high, exchange_low=signal.exchange_low,

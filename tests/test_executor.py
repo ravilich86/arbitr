@@ -3,7 +3,13 @@
 import pytest
 
 from arb.exchanges import ExchangeConnector
-from arb.executor import Executor, compute_base_amount, parse_order, vwap_fill
+from arb.executor import (
+    Executor,
+    compute_base_amount,
+    compute_min_base,
+    parse_order,
+    vwap_fill,
+)
 from arb.models import ArbSignal, ContractMeta, LegStatus, PositionStatus
 from tests.fixtures import MockOrderBookClient, MockTradeClient
 
@@ -31,6 +37,38 @@ def test_compute_base_amount_respects_coarser_step():
 def test_compute_base_amount_zero_when_below_min():
     m = meta("a", step=0.001, min_amount=1000.0)
     assert compute_base_amount(100.0, 200.0, m, m) == 0.0
+
+
+# ---- минимальный объём (§8, режим min) ----
+def test_compute_min_base_satisfies_both():
+    # a требует min_amount 0.5, b — min_notional 100 (=> 1.0 при цене 100)
+    a = meta("a", step=0.001, min_amount=0.5, min_notional=0)
+    b = meta("b", step=0.001, min_amount=0.0, min_notional=100.0)
+    amt = compute_min_base(100.0, a, b)
+    assert amt >= 0.5           # >= min_amount a
+    assert amt * 100.0 >= 100.0  # >= min_notional b
+
+
+def test_compute_min_base_rounds_up_to_step():
+    a = meta("a", step=1.0, min_amount=0.3, min_notional=0)
+    b = meta("b", step=1.0, min_amount=0.0, min_notional=0)
+    amt = compute_min_base(100.0, a, b)
+    assert amt == 1.0  # 0.3 -> вверх до шага 1.0
+
+
+def test_plan_size_min_mode_small_margin():
+    m = meta("x", step=0.001, min_amount=0.001, min_notional=5.0)
+    ex = Executor({}, fees={}, dry_run=True, sizing_mode="min")
+    amount, notional = ex.plan_size(price=100.0, meta_high=m, meta_low=m)
+    assert notional >= 5.0 and notional < 50.0  # крошечный нотионал (не 2000)
+
+
+def test_plan_size_notional_mode():
+    m = meta("x", step=0.001, min_amount=0.001, min_notional=5.0)
+    ex = Executor({}, fees={}, dry_run=True, sizing_mode="notional",
+                  notional_target=2000.0)
+    amount, notional = ex.plan_size(price=100.0, meta_high=m, meta_low=m)
+    assert notional == pytest.approx(2000.0, rel=0.01)
 
 
 # ---- парсинг ордера ----

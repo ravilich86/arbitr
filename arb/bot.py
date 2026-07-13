@@ -397,7 +397,16 @@ class ArbitrageBot:
 
         max_check = int((self.history_cfg or {}).get("max_candidates_check", 10))
         for sig in signals[:max_check]:
-            margin_required = sig.notional / max(self.risk.leverage, 1)
+            # Планируем объём под режим размера (min/notional), чтобы маржа для
+            # риск-чека была реальной (в min-режиме — крошечной).
+            cand = self.candidates.get(sig.symbol)
+            meta_h = cand.contracts.get(sig.exchange_high) if cand else None
+            meta_l = cand.contracts.get(sig.exchange_low) if cand else None
+            if meta_h and meta_l:
+                _, notional = self.executor.plan_size(sig.ask_low, meta_h, meta_l)
+            else:
+                notional = sig.notional
+            margin_required = notional / max(self.risk.leverage, 1)
             free_margin = await self._free_margin(sig.exchange_high, sig.exchange_low)
             decision = self.risk.can_open(
                 sig.symbol, self.open_positions, margin_required, free_margin,

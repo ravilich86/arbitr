@@ -66,6 +66,9 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
         margin_mode=sz.get("margin_mode", "isolated"),
         simulate_slippage=ex_cfg.get("simulate_slippage", True),
         orderbook_limit=ex_cfg.get("orderbook_limit", 50),
+        sizing_mode=sz.get("mode", "notional"),
+        notional_target=sz.get("notional_target", 2000.0),
+        position_size=sz.get("position_size"),
     )
 
     risk = RiskManager(
