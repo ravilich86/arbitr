@@ -21,6 +21,7 @@ from .executor import Executor, current_spread, estimate_open_pnl, should_exit
 from .logger import SessionSummary, TradeLogger
 from .marketdata import MarketData, parse_ticker
 from .models import Candidate, Position, PositionStatus
+from .reconcile import close_positions, fetch_all_positions, pair_positions
 from .risk import RiskManager
 from .scanner import (
     Scanner,
@@ -54,6 +55,7 @@ class ArbitrageBot:
         trade_logger: TradeLogger,
         summary: Optional[SessionSummary] = None,
         notifier=None,
+        store=None,
         clock=None,
     ):
         import time as _time
@@ -66,6 +68,7 @@ class ArbitrageBot:
         self.trade_logger = trade_logger
         self.summary = summary or SessionSummary()
         self.notifier = notifier
+        self.store = store
         self._clock = clock or _time.time
         self._bg_tasks: set = set()
 
@@ -106,6 +109,37 @@ class ArbitrageBot:
             len(res.candidates), len(res.suspicious), len(res.single_exchange),
             len(res.delisting),
         )
+
+    # ---- реконсиляция на старте (проверка орфанов) ----
+    async def startup_reconcile(self) -> None:
+        """Проверить на старте, нет ли незахеджированных (одиночных) ног.
+
+        Читает реальные позиции со всех бирж, спаривает их в арб-пары; если
+        находит «орфана» (ногу без противоположной) — алертит и, при
+        risk.close_orphans_on_start и боевом режиме, закрывает его.
+        """
+        try:
+            views = await fetch_all_positions(self.connectors)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Реконсиляция на старте не удалась: %s", exc)
+            return
+        if not views:
+            logger.info("Реконсиляция: открытых позиций на биржах нет — чисто")
+            return
+        pairs, orphans = pair_positions(views)
+        logger.info("Реконсиляция: %d ног -> %d согласованных пар, %d орфанов",
+                    len(views), len(pairs), len(orphans))
+        if not orphans:
+            return
+        desc = ", ".join(f"{o.exchange}:{o.symbol}:{o.side}({o.size:g})" for o in orphans)
+        logger.warning("АНОМАЛИЯ: незахеджированные ноги: %s", desc)
+        if self.notifier:
+            self._notify(
+                f"🤖 {getattr(self.notifier, 'app_name', 'Бот')}\n"
+                f"⚠️ Аномалия на старте: незахеджированные ноги\n{desc}")
+        if self.config.risk.get("close_orphans_on_start", False) and not self.config.dry_run:
+            await close_positions(self.connectors, orphans, execute=True)
+            logger.warning("Орфаны закрыты (close_orphans_on_start=true).")
 
     # ---- актуальные комиссии с бирж ----
     async def refresh_fees(self) -> None:
@@ -264,6 +298,8 @@ class ArbitrageBot:
                             pos.realized_pnl)
                 if self.notifier:
                     self._notify(self.notifier.close_message(pos, self.config.dry_run))
+                if self.store:
+                    self.store.remove(pos.id)
             else:
                 still_open.append(pos)
         self.open_positions = still_open
@@ -333,6 +369,14 @@ class ArbitrageBot:
                 self.open_positions.append(pos)
                 if self.notifier:
                     self._notify(self.notifier.entry_message(sig, self.config.dry_run))
+                if self.store:
+                    self.store.add({
+                        "id": pos.id, "symbol": pos.symbol,
+                        "exchange_high": pos.exchange_high, "exchange_low": pos.exchange_low,
+                        "short_amount": pos.short_leg.filled_amount,
+                        "long_amount": pos.long_leg.filled_amount,
+                        "open_time": pos.open_time,
+                    })
                 return  # вошли — на этой итерации больше не открываем
             logger.warning("Вход %s не состоялся: %s", sig.symbol, pos.close_reason)
 
@@ -670,6 +714,7 @@ class ArbitrageBot:
                   stats_interval: float = 20.0) -> None:
         await self.refresh_universe()
         await self.refresh_fees()
+        await self.startup_reconcile()
         await self.prequalify_universe(
             concurrency=int((self.history_cfg or {}).get("prefilter_concurrency", 20)))
         if self.notifier:

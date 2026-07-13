@@ -20,8 +20,10 @@ from .executor import Executor
 from .logger import TradeLogger, setup_app_logger
 from .marketdata import MarketData
 from .notifier import build_notifier
+from .reconcile import close_all, reconcile
 from .risk import RiskManager
 from .scanner import PersistenceTracker, Scanner
+from .state import PositionStore
 
 
 def build_bot(config: Config, connectors=None) -> ArbitrageBot:
@@ -78,9 +80,12 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
     trade_logger = TradeLogger(
         config.logging.get("trades_log", "logs/trades.jsonl"))
     notifier = build_notifier(config.telegram)
+    state_cfg = config.raw.get("state", {}) or {}
+    store = (PositionStore(state_cfg.get("positions_file", "data/positions.json"))
+             if state_cfg.get("enabled", True) else None)
 
     return ArbitrageBot(config, connectors, md, scanner, executor, risk,
-                        trade_logger, notifier=notifier)
+                        trade_logger, notifier=notifier, store=store)
 
 
 def _install_ws_noise_filter(log) -> None:
@@ -108,6 +113,27 @@ async def _run(args) -> None:
         level=config.logging.get("level", "INFO"),
     )
     _install_ws_noise_filter(log)
+    # Аварийные команды: закрыть всё / проверить парность и закрыть орфанов.
+    if getattr(args, "close_all", False) or getattr(args, "reconcile", False):
+        # execute=True только в боевом режиме или с --force (защита от случайностей).
+        execute = (not config.dry_run) or getattr(args, "force", False)
+        if not execute:
+            log.warning("dry_run=true — только ОТЧЁТ, ордера не отправляются "
+                        "(добавь --force или поставь dry_run=false для реального закрытия)")
+        connectors = create_connectors(config)
+        try:
+            if args.close_all:
+                res = await close_all(connectors, execute)
+                log.info("CLOSE-ALL: позиций=%d, execute=%s", res["total"], execute)
+            else:
+                res = await reconcile(connectors, execute)
+                log.info("RECONCILE: пар=%d, орфанов=%d, execute=%s",
+                         len(res["pairs"]), len(res["orphans"]), execute)
+        finally:
+            for conn in connectors.values():
+                await conn.close()
+        return
+
     # Быстрая проверка Telegram: отправить тестовое сообщение и выйти.
     if getattr(args, "test_telegram", False):
         notifier = build_notifier(config.telegram)
@@ -152,6 +178,12 @@ def main() -> None:
     parser.add_argument("--rest", action="store_true", help="использовать REST вместо WS")
     parser.add_argument("--test-telegram", action="store_true",
                         help="отправить тестовое сообщение в Telegram и выйти")
+    parser.add_argument("--close-all", action="store_true",
+                        help="ПАНИКА: закрыть ВСЕ позиции на всех биржах и выйти")
+    parser.add_argument("--reconcile", action="store_true",
+                        help="проверить парность позиций и закрыть незахеджированных орфанов")
+    parser.add_argument("--force", action="store_true",
+                        help="реально отправлять ордера закрытия даже при dry_run")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
