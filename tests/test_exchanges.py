@@ -95,6 +95,13 @@ def test_extract_delist_time_none_when_absent():
     assert extract_delist_time(m) is None
 
 
+def test_market_to_contract_taker_default():
+    m = make_market("BTC/USDT:USDT", "BTC")
+    m["taker"] = 0.0004
+    c = market_to_contract("bybit", m)
+    assert c.taker_fee_default == 0.0004
+
+
 def test_representative_taker_picks_common():
     fees = {
         "BTC/USDT:USDT": {"taker": 0.0004, "maker": 0.0002},
@@ -108,14 +115,34 @@ def test_representative_taker_none_when_empty():
     assert _representative_taker({}) is None
 
 
-async def test_fetch_taker_fee_from_trading_fees():
-    client = MockFeeClient(trading_fees={"BTC/USDT:USDT": {"taker": 0.0003}})
-    conn = ExchangeConnector("binance", client)
-    assert await fetch_taker_fee(conn) == 0.0003
+def _swap_conn(exchange, client, taker_default=None):
+    conn = ExchangeConnector(exchange, client)
+    conn.contracts = {"BTC/USDT": market_to_contract(
+        exchange, {**make_market("BTC/USDT:USDT", "BTC"),
+                   "taker": taker_default} if taker_default is not None
+        else make_market("BTC/USDT:USDT", "BTC"))}
+    return conn
 
 
-async def test_fetch_taker_fee_default_fallback():
-    # нет fetch_trading_fees -> берём дефолт из метаданных клиента
-    client = MockFeeClient(trading_fees=None, default_taker=0.0006)
-    conn = ExchangeConnector("bybit", client)
-    assert await fetch_taker_fee(conn) == 0.0006
+async def test_fetch_taker_fee_per_swap_symbol():
+    # аккаунтная ставка именно по swap-символу
+    client = MockFeeClient(per_symbol_taker={"BTC/USDT:USDT": 0.0002})
+    conn = _swap_conn("mexc", client)
+    assert await fetch_taker_fee(conn) == 0.0002
+
+
+async def test_fetch_taker_fee_filters_swap_only():
+    # fetch_trading_fees содержит спот (0.002) и своп (0.0002) — берём только своп
+    client = MockFeeClient(trading_fees={
+        "BTC/USDT:USDT": {"taker": 0.0002},   # своп (наш)
+        "BTC/USDT": {"taker": 0.002},          # спот — игнор
+    })
+    conn = _swap_conn("mexc", client)
+    assert await fetch_taker_fee(conn) == 0.0002
+
+
+async def test_fetch_taker_fee_market_default_fallback():
+    # нет аккаунтных ставок -> публичный taker фьючерсного рынка
+    client = MockFeeClient()
+    conn = _swap_conn("bybit", client, taker_default=0.0004)
+    assert await fetch_taker_fee(conn) == 0.0004

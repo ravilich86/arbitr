@@ -198,6 +198,28 @@ def test_filters_disable_depth():
     assert ev.passed is True  # глубина не проверяется
 
 
+def test_fee_coverage_base_check_always_on():
+    # round-trip комиссии = 2*(0.005+0.005) = 2%; сырой спред 1.5% < 2% -> не входим,
+    # даже если фильтр net_spread выключен (базовая проверка перекрытия комиссий)
+    s = _scanner(fees={"h": 0.005, "l": 0.005}, min_gross_spread=0.005,
+                 filters={"net_spread": False, "max_gross_spread": False})
+    ev = s.evaluate_pair("X/USDT", "h", "l",
+                         q("h", "X/USDT", 101.5, 101.6),
+                         q("l", "X/USDT", 99.9, 100.0))
+    assert ev.passed is False
+    assert any("комиссии" in r for r in ev.reasons)
+
+
+def test_fee_coverage_passes_when_spread_exceeds_fees():
+    # спред 1.5% > комиссии 0.4% -> базовая проверка пройдена
+    s = _scanner(fees={"h": 0.0005, "l": 0.0005}, min_gross_spread=0.005,
+                 filters={"net_spread": False})
+    ev = s.evaluate_pair("X/USDT", "h", "l",
+                         q("h", "X/USDT", 101.5, 101.6),
+                         q("l", "X/USDT", 99.9, 100.0))
+    assert ev.passed is True
+
+
 def test_filters_disable_net():
     s = _scanner(min_net_spread=0.5, filters={"net_spread": False})  # порог заведомо велик
     ev = s.evaluate_pair("BTC/USDT", "h", "l",

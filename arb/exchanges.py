@@ -111,6 +111,8 @@ def market_to_contract(exchange: str, market: dict) -> ContractMeta:
         contract_size=_to_float(market.get("contractSize")),
         funding_interval_hours=None,  # заполняется на Этапе 3 (§5) через fetch_funding_rate
         delist_time=extract_delist_time(market),
+        # taker именно этого (фьючерсного) рынка — публичный дефолт, верный по типу.
+        taker_fee_default=_to_float(market.get("taker")),
     )
 
 
@@ -246,32 +248,44 @@ def _representative_taker(fees: Any) -> Optional[float]:
 
 
 async def fetch_taker_fee(connector: "ExchangeConnector") -> Optional[float]:
-    """Актуальная taker-комиссия биржи (с учётом VIP-уровня аккаунта).
+    """Актуальная ФЬЮЧЕРСНАЯ taker-комиссия биржи (с учётом VIP-уровня аккаунта).
 
-    Порядок: аккаунтные fetch_trading_fees -> посимвольный fetch_trading_fee ->
-    дефолт из метаданных клиента. None, если ничего не удалось.
+    Важно брать ставку именно по свопу, а не по споту. Порядок:
+      1) fetch_trading_fee(swap_symbol) — аккаунтная ставка конкретного перпа;
+      2) fetch_trading_fees(), но ТОЛЬКО по нашим swap-символам (без спота);
+      3) публичный taker фьючерсного рынка из метаданных (market['taker']);
+      4) глобальный дефолт клиента.
     """
     client = connector.client
+    contracts = connector.contracts
+    rep = next(iter(contracts.values())) if contracts else None
 
-    if hasattr(client, "fetch_trading_fees"):
+    # 1) Аккаунтная ставка по конкретному swap-символу (верный тип рынка).
+    if rep is not None and hasattr(client, "fetch_trading_fee"):
         try:
-            fees = await client.fetch_trading_fees()
-            taker = _representative_taker(fees)
-            if taker is not None:
-                return taker
-        except Exception:  # noqa: BLE001
-            pass
-
-    if hasattr(client, "fetch_trading_fee") and connector.contracts:
-        raw_symbol = next(iter(connector.contracts.values())).raw_symbol
-        try:
-            f = await client.fetch_trading_fee(raw_symbol)
+            f = await client.fetch_trading_fee(rep.raw_symbol)
             if isinstance(f, dict) and f.get("taker") is not None:
                 return _to_float(f.get("taker"))
         except Exception:  # noqa: BLE001
             pass
 
-    # Дефолт из метаданных ccxt (не привязан к аккаунту).
+    # 2) Аккаунтные ставки, отфильтрованные ТОЛЬКО по нашим swap-символам.
+    if contracts and hasattr(client, "fetch_trading_fees"):
+        try:
+            fees = await client.fetch_trading_fees()
+            swap_syms = {m.raw_symbol for m in contracts.values()}
+            taker = _representative_taker(
+                {s: v for s, v in (fees or {}).items() if s in swap_syms})
+            if taker is not None:
+                return taker
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 3) Публичный taker фьючерсного рынка (из market['taker'], верный по типу).
+    if rep is not None and rep.taker_fee_default is not None:
+        return rep.taker_fee_default
+
+    # 4) Глобальный дефолт клиента.
     try:
         t = getattr(client, "fees", {}).get("trading", {}).get("taker")
         return _to_float(t)

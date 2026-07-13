@@ -139,12 +139,21 @@ class MockTradeClient:
 
 
 class MockFeeClient:
-    """Мок клиента для проверки подтягивания комиссий с биржи."""
+    """Мок клиента для проверки подтягивания ФЬЮЧЕРСНЫХ комиссий с биржи."""
 
-    def __init__(self, trading_fees=None, default_taker=None):
+    def __init__(self, per_symbol_taker=None, trading_fees=None, default_taker=None):
+        self._per = per_symbol_taker      # float или {raw_symbol: taker}
         self._trading_fees = trading_fees
         if default_taker is not None:
             self.fees = {"trading": {"taker": default_taker}}
+
+    async def fetch_trading_fee(self, symbol):
+        if self._per is None:
+            raise RuntimeError("not supported")
+        t = self._per if isinstance(self._per, (int, float)) else self._per.get(symbol)
+        if t is None:
+            raise RuntimeError("no fee for symbol")
+        return {"taker": t, "maker": t / 2}
 
     async def fetch_trading_fees(self):
         if self._trading_fees is None:

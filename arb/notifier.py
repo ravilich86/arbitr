@@ -78,7 +78,8 @@ class TelegramNotifier:
             f"📊 Пара: {sig.symbol}\n"
             f"🔺 Шорт: {sig.exchange_high} @ {sig.bid_high:g}\n"
             f"🔻 Лонг: {sig.exchange_low} @ {sig.ask_low:g}\n"
-            f"📈 Спред: {sig.raw_spread * 100:.2f}% (чистый {sig.net_spread * 100:.2f}%)\n"
+            f"📈 Спред: {sig.raw_spread * 100:.2f}% "
+            f"(чистый {sig.net_spread * 100:.2f}%, комиссии {sig.fee_cost * 100:.2f}%)\n"
             f"{self._mode(dry_run)}"
         )
 
