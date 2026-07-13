@@ -35,7 +35,8 @@ class PosView:
     symbol: str          # нормализованный, напр. 'BTC/USDT'
     raw_symbol: str      # биржевой символ ccxt (для ордера закрытия)
     side: str            # 'long' | 'short'
-    size: float          # объём в базовом активе (abs)
+    size: float          # объём в базовом активе (abs) — для сопоставления пар
+    contracts: float = 0.0   # число контрактов (abs) — для ордера закрытия
     entry_price: Optional[float] = None
 
     def close_side(self) -> str:
@@ -71,6 +72,7 @@ def normalize_position(exchange: str, p: dict) -> Optional[PosView]:
         raw_symbol=raw_symbol,
         side=side,
         size=abs(contracts) * cs,
+        contracts=abs(contracts),
         entry_price=float(entry) if entry else None,
     )
 
@@ -147,13 +149,20 @@ async def close_positions(
             results.append((v, "reported"))
             continue
         client = connectors[v.exchange].client
+        # Закрываем по ЧИСЛУ КОНТРАКТОВ (не в базовых единицах) — так ждут OKX и др.
+        amount = v.contracts or v.size
+        if hasattr(client, "amount_to_precision"):
+            try:
+                amount = float(client.amount_to_precision(v.raw_symbol, amount))
+            except Exception:  # noqa: BLE001
+                pass
         try:
             await client.create_order(
-                v.raw_symbol, "market", v.close_side(), v.size, None,
+                v.raw_symbol, "market", v.close_side(), amount, None,
                 {"reduceOnly": True})
             results.append((v, "closed"))
-            logger.info("Закрыта позиция %s %s %s %.6f",
-                        v.exchange, v.symbol, v.side, v.size)
+            logger.info("Закрыта позиция %s %s %s %g",
+                        v.exchange, v.symbol, v.side, amount)
         except Exception as exc:  # noqa: BLE001
             results.append((v, f"error: {exc}"))
             logger.error("Ошибка закрытия %s %s: %s", v.exchange, v.symbol, exc)

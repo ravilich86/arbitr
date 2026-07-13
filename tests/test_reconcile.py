@@ -109,6 +109,18 @@ async def test_close_all_executes_orders():
     assert conns["binance"].client.orders[0]["params"]["reduceOnly"] is True
 
 
+async def test_close_uses_contracts_not_base_amount():
+    # OKX-случай: contractSize != 1. Закрывать надо по числу контрактов (2), а не
+    # по базовому объёму (2*0.001=0.002), иначе биржа отклонит по минимуму.
+    conns = _conns(
+        [{"symbol": "RIVER/USDT:USDT", "side": "short", "contracts": 2,
+          "contractSize": 0.001}],
+        [],
+    )
+    await close_all(conns, execute=True)
+    assert conns["binance"].client.orders[0]["amount"] == 2  # контракты, не 0.002
+
+
 async def test_close_all_report_only():
     conns = _conns(
         [{"symbol": "BTC/USDT:USDT", "side": "short", "contracts": 10, "contractSize": 1}],
