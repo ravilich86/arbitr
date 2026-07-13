@@ -119,7 +119,8 @@ class RiskManager:
         active = [p for p in open_positions
                   if p.status in (PositionStatus.OPEN, PositionStatus.OPENING,
                                   PositionStatus.CLOSING)]
-        if len(active) >= self.max_concurrent_positions:
+        # max_concurrent_positions == 0 -> без лимита (берём по максимуму).
+        if self.max_concurrent_positions and len(active) >= self.max_concurrent_positions:
             return RiskDecision(False, "достигнут лимит одновременных позиций")
 
         if self.in_cooldown(symbol, now):

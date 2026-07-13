@@ -134,8 +134,9 @@ class ArbitrageBot:
         desc = ", ".join(f"{o.exchange}:{o.symbol}:{o.side}({o.size:g})" for o in orphans)
         logger.warning("АНОМАЛИЯ: незахеджированные ноги: %s", desc)
         if self.notifier:
-            self._notify(
-                f"🤖 {getattr(self.notifier, 'app_name', 'Бот')}\n"
+            self._notify_event(
+                "anomaly",
+                f"🤖 {self._app_name()}\n"
                 f"⚠️ Аномалия на старте: незахеджированные ноги\n{desc}")
         if self.config.risk.get("close_orphans_on_start", False) and not self.config.dry_run:
             await close_positions(self.connectors, orphans, execute=True)
@@ -252,6 +253,7 @@ class ArbitrageBot:
     async def poll_once(self, now: Optional[float] = None) -> None:
         now = now if now is not None else self._clock()
         await self._monitor_positions(now)
+        await self._harvest_losers(now)
         if not self.risk.killed:
             await self._scan_and_enter(now)
 
@@ -287,22 +289,72 @@ class ArbitrageBot:
                 logger.warning("Позиция %s: %s", pos.symbol, liq.reason)
 
             if exit_now:
-                # Начислить funding за время удержания (оценка) перед расчётом P&L.
-                pos.funding_accrued = self._accrued_funding(pos, hold)
-                await self.executor.close_position(pos, qh, ql, reason or "target")
-                self.risk.register_close(pos.symbol, now)
-                row = self.trade_logger.log_position(
-                    pos, leverage=self.risk.leverage, exit_spread=cur)
-                self.summary.record_trade(pos.realized_pnl)
-                logger.info("Закрыта %s: причина=%s P&L=%s", pos.symbol, reason,
-                            pos.realized_pnl)
-                if self.notifier:
-                    self._notify(self.notifier.close_message(pos, self.config.dry_run))
-                if self.store:
-                    self.store.remove(pos.id)
+                await self._close_position(pos, qh, ql, reason or "target", now,
+                                           hold, exit_spread=cur)
             else:
                 still_open.append(pos)
         self.open_positions = still_open
+
+    async def _close_position(self, pos: Position, qh, ql, reason: str, now: float,
+                              hold: float, exit_spread: Optional[float] = None) -> None:
+        """Закрыть позицию, посчитать P&L, залогировать, уведомить + общий баланс."""
+        # Начислить funding за время удержания (оценка) перед расчётом P&L.
+        pos.funding_accrued = self._accrued_funding(pos, hold)
+        await self.executor.close_position(pos, qh, ql, reason)
+        self.risk.register_close(pos.symbol, now)
+        self.trade_logger.log_position(
+            pos, leverage=self.risk.leverage,
+            exit_spread=exit_spread if exit_spread is not None else current_spread(qh, ql))
+        self.summary.record_trade(pos.realized_pnl)
+        logger.info("Закрыта %s: причина=%s P&L=%s", pos.symbol, reason, pos.realized_pnl)
+        if self.store:
+            self.store.remove(pos.id)
+        # Пункт 10: общий баланс всех бирж после закрытия любой позиции.
+        total, parts = await self._total_balance()
+        pstr = ", ".join(
+            f"{n}={v:.2f}" if v is not None else f"{n}=?" for n, v in parts.items())
+        logger.info("Общий баланс всех бирж: %.2f USDT (%s)", total, pstr)
+        if self.notifier:
+            msg = self.notifier.close_message(pos, self.config.dry_run)
+            msg += f"\n💵 Общий баланс: {total:.2f} USDT"
+            self._notify_event("close", msg)
+
+    async def _harvest_losers(self, now: float) -> None:
+        """Пункт 6: закрывать убыточные пары за счёт накопленной прибыли.
+
+        Логика: если по паре нереализованный убыток, а сессионный P&L его
+        перекрывает — закрываем убыточную позицию сейчас, «профинансировав» её
+        прибылью. Правило безопасности: после закрытия сессионный net не должен
+        уйти ниже profit_buffer_keep. Начинаем с самых убыточных.
+        """
+        if not self.config.risk.get("profit_buffer_close", False):
+            return
+        keep = self.config.risk.get("profit_buffer_keep", 0.0)
+
+        scored = []
+        for pos in self.open_positions:
+            if pos.status != PositionStatus.OPEN:
+                continue
+            qh = self.md.get_quote(pos.exchange_high, pos.symbol)
+            ql = self.md.get_quote(pos.exchange_low, pos.symbol)
+            if qh is None or ql is None:
+                continue
+            fee_h = self.scanner.fees.get(pos.exchange_high, 0.0)
+            fee_l = self.scanner.fees.get(pos.exchange_low, 0.0)
+            est = estimate_open_pnl(pos, qh, ql, fee_h, fee_l)
+            if est < 0:
+                scored.append((est, pos, qh, ql))
+        scored.sort(key=lambda x: x[0])  # самые убыточные первыми
+
+        for est, pos, qh, ql in scored:
+            if self.summary.total_pnl + est >= keep:  # прибыль перекрывает убыток
+                hold = now - (pos.open_time or now)
+                await self._close_position(pos, qh, ql, "profit_buffer", now, hold,
+                                           exit_spread=current_spread(qh, ql))
+                logger.info("Убыточная %s закрыта за счёт прибыли (est=%.4f)",
+                            pos.symbol, est)
+        self.open_positions = [p for p in self.open_positions
+                               if p.status == PositionStatus.OPEN]
 
     def _accrued_funding(self, pos: Position, hold_seconds: float) -> float:
         """Оценка чистого funding за время удержания в USDT (§5).
@@ -322,7 +374,9 @@ class ArbitrageBot:
     async def _scan_and_enter(self, now: float) -> None:
         active = [p for p in self.open_positions
                   if p.status in (PositionStatus.OPEN, PositionStatus.OPENING)]
-        if len(active) >= self.risk.max_concurrent_positions:
+        # max_concurrent_positions == 0 -> без лимита (пункт 7).
+        limit = self.risk.max_concurrent_positions
+        if limit and len(active) >= limit:
             return
 
         # Собираем ВСЕ проходящие сигналы и сортируем по убыванию чистого спреда.
@@ -344,13 +398,22 @@ class ArbitrageBot:
         max_check = int((self.history_cfg or {}).get("max_candidates_check", 10))
         for sig in signals[:max_check]:
             margin_required = sig.notional / max(self.risk.leverage, 1)
-            free_margin = self._free_margin(sig.exchange_high, sig.exchange_low)
+            free_margin = await self._free_margin(sig.exchange_high, sig.exchange_low)
             decision = self.risk.can_open(
                 sig.symbol, self.open_positions, margin_required, free_margin,
                 (sig.exchange_high, sig.exchange_low), now,
             )
             if not decision.allowed:
                 logger.info("Сигнал %s отклонён риском: %s", sig.symbol, decision.reason)
+                # Пункт 8: если не хватает баланса — уведомить в Telegram.
+                if "маржи" in (decision.reason or ""):
+                    self._notify_event(
+                        "balance",
+                        f"🤖 {self._app_name()}\n"
+                        f"⚠️ Не хватает баланса для входа\n"
+                        f"📊 Пара: {sig.symbol} ({sig.exchange_high} ↔ {sig.exchange_low})\n"
+                        f"💵 Нужно ~{margin_required:.2f} USDT маржи, свободно: "
+                        f"{', '.join(f'{e}={free_margin.get(e, 0):.2f}' for e in (sig.exchange_high, sig.exchange_low))}")
                 continue
 
             # Обязательная историческая сверка «было вместе -> сейчас разошлось».
@@ -368,7 +431,8 @@ class ArbitrageBot:
             if pos.status == PositionStatus.OPEN:
                 self.open_positions.append(pos)
                 if self.notifier:
-                    self._notify(self.notifier.entry_message(sig, self.config.dry_run))
+                    self._notify_event(
+                        "entry", self.notifier.entry_message(sig, self.config.dry_run))
                 if self.store:
                     self.store.add({
                         "id": pos.id, "symbol": pos.symbol,
@@ -435,10 +499,62 @@ class ArbitrageBot:
                     signal.symbol, div, max_div)
         return True, None
 
-    def _free_margin(self, *exchanges: str) -> dict[str, float]:
-        """Свободная маржа по биржам. В dry_run считаем бюджет доступным."""
-        cap = self.risk.max_position_per_exchange
-        return {ex: cap for ex in exchanges}
+    async def _free_margin(self, *exchanges: str) -> dict[str, float]:
+        """Свободная маржа (USDT) по биржам.
+
+        В dry_run считаем бюджет доступным (бюджет per-exchange из риска). В боевом
+        режиме — читаем реальный свободный баланс (fetch_balance)."""
+        if self.config.dry_run:
+            cap = self.risk.max_position_per_exchange
+            return {ex: cap for ex in exchanges}
+        result: dict[str, float] = {}
+        for ex in exchanges:
+            client = self.connectors[ex].client
+            try:
+                bal = await client.fetch_balance()
+                usdt = bal.get("USDT", {}) if isinstance(bal.get("USDT"), dict) else {}
+                free = usdt.get("free")
+                if free is None:
+                    free = (bal.get("free", {}) or {}).get("USDT", 0)
+                result[ex] = float(free or 0)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Баланс %s недоступен: %s", ex, exc)
+                result[ex] = 0.0
+        return result
+
+    async def _total_balance(self) -> tuple[float, dict]:
+        """Суммарный баланс USDT по всем биржам (equity). Для сводки после закрытия."""
+        total = 0.0
+        parts: dict[str, Optional[float]] = {}
+        for name, conn in self.connectors.items():
+            try:
+                bal = await conn.client.fetch_balance()
+                usdt = bal.get("USDT", {}) if isinstance(bal.get("USDT"), dict) else {}
+                eq = usdt.get("total")
+                if eq is None:
+                    eq = (bal.get("total", {}) or {}).get("USDT", 0)
+                parts[name] = float(eq or 0)
+                total += parts[name]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Баланс %s недоступен: %s", name, exc)
+                parts[name] = None
+        return total, parts
+
+    def _app_name(self) -> str:
+        return getattr(self.notifier, "app_name", "Бот") if self.notifier else "Бот"
+
+    def _notify_event(self, category: str, text: str) -> None:
+        """Отправить уведомление с учётом политики (пункт 9).
+
+        В боевом режиме (dry_run=false) при telegram.live_only_trades=true шлём
+        ТОЛЬКО события открытия/закрытия позиций; прочие (старт, баланс, аномалии,
+        диагностика) — не шлём. В dry_run шлём всё.
+        """
+        tg = self.config.telegram or {}
+        live_only = tg.get("live_only_trades", True)
+        if not self.config.dry_run and live_only and category not in ("entry", "close"):
+            return
+        self._notify(text)
 
     def _notify(self, text: str) -> None:
         """Отправить уведомление в фоне (не блокируя цикл; ошибки глушатся)."""
@@ -718,7 +834,7 @@ class ArbitrageBot:
         await self.prequalify_universe(
             concurrency=int((self.history_cfg or {}).get("prefilter_concurrency", 20)))
         if self.notifier:
-            self._notify(self.notifier.startup_message(
+            self._notify_event("startup", self.notifier.startup_message(
                 list(self.connectors.keys()), len(self.candidates), self.config.dry_run))
         if use_ws:
             await self._run_streaming(iterations, interval, warmup, funding_interval,

@@ -160,6 +160,61 @@ def test_accrued_funding(tmp_path):
     assert acc == pytest.approx(0.001 * 1 * 20 * 101.0)  # income_frac * нотионал шорта
 
 
+async def test_notify_event_policy_live_only(tmp_path):
+    bot = _bot(tmp_path)
+    bot.notifier = _RecordingNotifier()
+    bot.config.dry_run = False              # боевой режим
+    bot.config.telegram = {"live_only_trades": True}
+    bot._notify_event("startup", "s")       # не должно уйти
+    bot._notify_event("balance", "b")       # не должно уйти
+    bot._notify_event("entry", "e")         # должно уйти
+    bot._notify_event("close", "c")         # должно уйти
+    await asyncio.sleep(0)
+    assert "e" in bot.notifier.sent and "c" in bot.notifier.sent
+    assert "s" not in bot.notifier.sent and "b" not in bot.notifier.sent
+
+
+async def test_notify_event_all_in_dry_run(tmp_path):
+    bot = _bot(tmp_path)  # dry_run=True
+    bot.notifier = _RecordingNotifier()
+    bot.config.telegram = {"live_only_trades": True}
+    bot._notify_event("startup", "s")
+    await asyncio.sleep(0)
+    assert "s" in bot.notifier.sent  # в dry_run шлём всё
+
+
+async def test_harvest_closes_loser_with_profit(tmp_path):
+    bot = _bot(tmp_path)
+    bot.config.risk = {**bot.config.risk, "profit_buffer_close": True,
+                       "profit_buffer_keep": 0.0}
+    # открыть позицию
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 101.0, 101.1, timestamp=0)
+    bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.9, 100.0, timestamp=0)
+    await bot.poll_once(now=1000)
+    assert len(bot.open_positions) == 1
+
+    # теперь позиция в небольшом убытке (спред разошёлся, но < max_adverse 2%)
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 101.4, 101.5, timestamp=0)
+    bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.6, 99.7, timestamp=0)
+    bot.summary.total_pnl = 100.0  # накоплена прибыль
+    await bot._harvest_losers(now=1001)
+    assert len(bot.open_positions) == 0  # убыточная закрыта за счёт прибыли
+
+
+async def test_harvest_skips_when_no_profit(tmp_path):
+    bot = _bot(tmp_path)
+    bot.config.risk = {**bot.config.risk, "profit_buffer_close": True,
+                       "profit_buffer_keep": 0.0}
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 101.0, 101.1, timestamp=0)
+    bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.9, 100.0, timestamp=0)
+    await bot.poll_once(now=1000)
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 101.4, 101.5, timestamp=0)
+    bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.6, 99.7, timestamp=0)
+    bot.summary.total_pnl = 0.0  # прибыли нет
+    await bot._harvest_losers(now=1001)
+    assert len(bot.open_positions) == 1  # держим — нечем крыть убыток
+
+
 async def test_bot_opens_on_signal(tmp_path):
     bot = _bot(tmp_path)
     # расхождение: H дороже (bid 101), L дешевле (ask 100)

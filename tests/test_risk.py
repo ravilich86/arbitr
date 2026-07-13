@@ -68,6 +68,14 @@ def test_can_open_insufficient_margin():
     assert d.allowed is False and "маржи" in d.reason
 
 
+def test_can_open_unlimited_when_zero():
+    # max_concurrent_positions == 0 -> без лимита на число пар (пункт 7)
+    rm = RiskManager(max_concurrent_positions=0, max_position_per_exchange=1e9)
+    d = rm.can_open("BTC/USDT", [_pos(), _pos(), _pos()], margin_required=50,
+                    free_margin={"h": 1e9, "l": 1e9}, exchanges=("h", "l"))
+    assert d.allowed is True
+
+
 def test_can_open_ok():
     rm = RiskManager(max_concurrent_positions=1, max_position_per_exchange=1000)
     d = rm.can_open("BTC/USDT", [], margin_required=100,
