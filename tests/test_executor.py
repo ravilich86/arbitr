@@ -158,6 +158,23 @@ async def test_prepare_leverage_steps_down():
     assert client.position_mode is False  # односторонний режим позиций
 
 
+async def test_place_leg_converts_base_to_contracts():
+    from arb.exchanges import ExchangeConnector
+    from arb.models import Side
+    client = MockTradeClient("fill")
+    conn = ExchangeConnector("okx", client)
+    m = ContractMeta("okx", "BTC/USDT", "BTC/USDT:USDT", "BTC", "USDT",
+                     step_size=0.001, min_amount=0.001, min_notional=5.0,
+                     max_leverage=100, contract_size=0.01)
+    conn.contracts = {"BTC/USDT": m}
+    ex = Executor({"okx": conn}, fees={"okx": 0.0005}, dry_run=False)
+    leg = await ex._place_leg("okx", "BTC/USDT", Side.SHORT, amount=1.0, ref_price=100.0)
+    # база 1.0 / contractSize 0.01 = 100 контрактов в ордере
+    assert client.orders[-1]["amount"] == 100.0
+    # filled возвращается в базовый актив: 100 * 0.01 = 1.0
+    assert leg.filled_amount == pytest.approx(1.0)
+
+
 async def test_open_position_dry_run():
     ex = Executor(_connectors(), fees={"h": 0.0005, "l": 0.0005}, dry_run=True)
     pos = await ex.open_position(_signal())

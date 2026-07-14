@@ -79,6 +79,8 @@ class ArbitrageBot:
         # WS-стриминг
         self._running = False
         self._stream_tasks: list = []
+        # Пары, уже отторгованные в этой сессии (one_shot_per_pair).
+        self._traded_pairs: set = set()
 
     # ---- построение вселенной (§3–4) ----
     async def refresh_universe(self) -> None:
@@ -274,13 +276,17 @@ class ArbitrageBot:
             fee_h = self.scanner.fees.get(pos.exchange_high, 0.0)
             fee_l = self.scanner.fees.get(pos.exchange_low, 0.0)
             est_pnl = estimate_open_pnl(pos, qh, ql, fee_h, fee_l)
+            notional = pos.short_leg.notional or 1.0
+            est_pnl_pct = est_pnl / notional if notional else None
 
             exit_now, reason = should_exit(
                 cur_spread=cur, hold_time=hold,
                 exit_spread=self.config.spread.get("exit_spread", 0.0),
                 max_hold_time=self.config.risk.get("max_hold_time", 3600),
                 max_adverse_spread=self.config.risk.get("max_adverse_spread", 0.02),
-                est_pnl=est_pnl, take_profit=self.config.spread.get("take_profit"),
+                est_pnl_pct=est_pnl_pct,
+                take_profit_pct=self.config.spread.get("take_profit_pct"),
+                stop_loss_pct=self.config.spread.get("stop_loss_pct"),
             )
             # риск-контроль ликвидации может форсировать закрытие (§9)
             liq = self.risk.check_liquidation(pos, qh.bid, ql.ask)
@@ -382,8 +388,11 @@ class ArbitrageBot:
         # Собираем ВСЕ проходящие сигналы и сортируем по убыванию чистого спреда.
         # Перебор (а не только «лучший») нужен, потому что верхний сигнал может не
         # пройти историческую сверку/риск — тогда берём следующий подходящий.
+        one_shot = self.config.risk.get("one_shot_per_pair", False)
         signals = []
         for symbol, cand in self.candidates.items():
+            if one_shot and symbol in self._traded_pairs:
+                continue  # пару уже брали в этой сессии — без повторений
             quotes = {ex: q for ex in cand.exchanges
                       if (q := self.md.get_quote(ex, symbol)) is not None}
             if len(quotes) < 2:
@@ -437,6 +446,7 @@ class ArbitrageBot:
                         sig.raw_spread, sig.net_spread)
             pos = await self.executor.open_position(sig)
             pos.open_time = now  # единый источник времени для расчёта удержания
+            self._traded_pairs.add(sig.symbol)  # one_shot: пара взята
             if pos.status == PositionStatus.OPEN:
                 self.open_positions.append(pos)
                 if self.notifier:

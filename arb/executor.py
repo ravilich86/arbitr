@@ -259,6 +259,17 @@ class Executor:
 
         client = self.connectors[exchange].client
         raw_symbol = self._raw_symbol(exchange, symbol)
+        # Объём ордера — в контрактах биржи: order = база / contractSize. Так на всех
+        # биржах открывается ОДИНАКОВЫЙ базовый объём (иначе OKX/др. трактуют число
+        # как контракты и получается разный объём, напр. 0.1 vs 1).
+        meta = self._meta(exchange, symbol)
+        cs = meta.contract_size if (meta and meta.contract_size) else 1.0
+        order_amount = amount / cs if cs else amount
+        if hasattr(client, "amount_to_precision"):
+            try:
+                order_amount = float(client.amount_to_precision(raw_symbol, order_amount))
+            except Exception:  # noqa: BLE001
+                pass
         params: dict[str, Any] = {}
         if reduce_only:
             params["reduceOnly"] = True
@@ -266,11 +277,12 @@ class Executor:
         try:
             order = await asyncio.wait_for(
                 client.create_order(raw_symbol, self.order_type, ccxt_side,
-                                    amount, price, params),
+                                    order_amount, price, params),
                 timeout=self.leg_timeout,
             )
             parsed = parse_order(order)
-            leg.filled_amount = parsed["filled"]
+            # filled приходит в контрактах -> возвращаем в базовый актив.
+            leg.filled_amount = parsed["filled"] * cs
             leg.avg_price = parsed["avg_price"]
             leg.order_id = parsed["id"]
             leg.status = parsed["status"]
@@ -534,18 +546,26 @@ def should_exit(
     exit_spread: float,
     max_hold_time: float,
     max_adverse_spread: float,
-    est_pnl: Optional[float] = None,
-    take_profit: Optional[float] = None,
+    est_pnl_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
+    stop_loss_pct: Optional[float] = None,
 ) -> tuple[bool, Optional[str]]:
     """Решить, пора ли закрывать позицию, и по какой причине (§7).
 
-    Порядок: схождение до цели -> take-profit -> расхождение сверх лимита ->
-    предельное время удержания.
+    Логика фиксации прибыли/убытка по нереализованному P&L (доля нотионала):
+      - take_profit_pct: прибыль достигла цели -> фиксируем прибыль;
+      - target: спред сошёлся, НО закрываем только если не в убытке (иначе держим,
+        чтобы комиссии/слиппедж не превратили выход в минус);
+      - stop_loss_pct: убыток достиг лимита -> фиксируем убыток;
+      - max_adverse: спред разошёлся сверх лимита -> контролируемое закрытие;
+      - max_hold_time: предельное время удержания.
     """
-    if cur_spread <= exit_spread:
-        return True, "target"
-    if take_profit is not None and est_pnl is not None and est_pnl >= take_profit:
+    if take_profit_pct is not None and est_pnl_pct is not None and est_pnl_pct >= take_profit_pct:
         return True, "take_profit"
+    if cur_spread <= exit_spread and (est_pnl_pct is None or est_pnl_pct >= 0):
+        return True, "target"
+    if stop_loss_pct is not None and est_pnl_pct is not None and est_pnl_pct <= -stop_loss_pct:
+        return True, "stop_loss"
     if cur_spread >= max_adverse_spread:
         return True, "max_adverse"
     if hold_time >= max_hold_time:

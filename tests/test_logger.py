@@ -10,6 +10,7 @@ from arb.logger import (
     TradeLogger,
     position_to_trade_row,
     setup_app_logger,
+    summarize_trades,
 )
 from arb.models import ArbSignal, Leg, LegStatus, Position, PositionStatus, Side
 
@@ -70,6 +71,24 @@ def test_session_summary():
     assert s.avg_pnl == pytest.approx(2.0)
     assert s.skipped_signals == 2
     assert "Сводка сессии" in s.render()
+
+
+def test_summarize_trades(tmp_path: Path):
+    p = tmp_path / "trades.jsonl"
+    p.write_text(
+        '{"symbol":"BTC/USDT","exchange_high":"gate","exchange_low":"binance",'
+        '"pnl_usdt":1.5,"close_reason":"target","leg_status":"both_ok"}\n'
+        '{"symbol":"BTC/USDT","pnl_usdt":-0.5,"close_reason":"stop_loss"}\n',
+        encoding="utf-8")
+    s = summarize_trades(str(p))
+    assert "всего=2" in s
+    assert "прибыльных=1" in s and "убыточных=1" in s
+    assert "BTC/USDT" in s
+
+
+def test_summarize_trades_empty(tmp_path: Path):
+    s = summarize_trades(str(tmp_path / "nope.jsonl"))
+    assert "пуст" in s
 
 
 def test_setup_app_logger(tmp_path: Path):

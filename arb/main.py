@@ -17,7 +17,7 @@ from .bot import ArbitrageBot
 from .config import Config, load_config
 from .exchanges import create_connectors
 from .executor import Executor
-from .logger import TradeLogger, setup_app_logger
+from .logger import TradeLogger, setup_app_logger, summarize_trades
 from .marketdata import MarketData
 from .notifier import build_notifier
 from .reconcile import close_all, reconcile
@@ -116,6 +116,12 @@ async def _run(args) -> None:
         level=config.logging.get("level", "INFO"),
     )
     _install_ws_noise_filter(log)
+    # История сделок из локального лога.
+    if getattr(args, "history", False):
+        text = summarize_trades(config.logging.get("trades_log", "logs/trades.jsonl"))
+        log.info("\n%s", text)
+        return
+
     # Аварийные команды: закрыть всё / проверить парность и закрыть орфанов.
     if getattr(args, "close_all", False) or getattr(args, "reconcile", False):
         # execute=True только в боевом режиме или с --force (защита от случайностей).
@@ -187,6 +193,8 @@ def main() -> None:
                         help="проверить парность позиций и закрыть незахеджированных орфанов")
     parser.add_argument("--force", action="store_true",
                         help="реально отправлять ордера закрытия даже при dry_run")
+    parser.add_argument("--history", action="store_true",
+                        help="показать сводку истории сделок из лога и выйти")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)

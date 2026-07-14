@@ -43,8 +43,30 @@ def test_should_exit_max_hold():
 def test_should_exit_take_profit():
     ok, reason = should_exit(cur_spread=0.005, hold_time=10, exit_spread=0.0,
                              max_hold_time=3600, max_adverse_spread=0.02,
-                             est_pnl=5.0, take_profit=3.0)
+                             est_pnl_pct=0.005, take_profit_pct=0.003)
     assert ok and reason == "take_profit"
+
+
+def test_should_exit_stop_loss():
+    ok, reason = should_exit(cur_spread=0.008, hold_time=10, exit_spread=0.0,
+                             max_hold_time=3600, max_adverse_spread=0.02,
+                             est_pnl_pct=-0.012, stop_loss_pct=0.01)
+    assert ok and reason == "stop_loss"
+
+
+def test_target_not_closed_at_loss():
+    # спред сошёлся (cur<=exit), но позиция в минусе -> НЕ закрываем по target
+    ok, reason = should_exit(cur_spread=0.0, hold_time=10, exit_spread=0.0,
+                             max_hold_time=3600, max_adverse_spread=0.02,
+                             est_pnl_pct=-0.005, stop_loss_pct=0.01)
+    assert not ok  # держим, пока не стоп/время/adverse
+
+
+def test_target_closed_when_not_loss():
+    ok, reason = should_exit(cur_spread=0.0, hold_time=10, exit_spread=0.0,
+                             max_hold_time=3600, max_adverse_spread=0.02,
+                             est_pnl_pct=0.002)
+    assert ok and reason == "target"
 
 
 def test_should_not_exit():

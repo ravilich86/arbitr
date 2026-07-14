@@ -216,6 +216,20 @@ async def test_harvest_skips_when_no_profit(tmp_path):
     assert len(bot.open_positions) == 1  # держим — нечем крыть убыток
 
 
+async def test_one_shot_per_pair(tmp_path):
+    bot = _bot(tmp_path)
+    bot.config.risk = {**bot.config.risk, "one_shot_per_pair": True}
+    bot.md.quotes[("h", "BTC/USDT")] = Quote("h", "BTC/USDT", 102.0, 102.1, timestamp=0)
+    bot.md.quotes[("l", "BTC/USDT")] = Quote("l", "BTC/USDT", 99.9, 100.0, timestamp=0)
+    await bot.poll_once(now=1000)
+    assert len(bot.open_positions) == 1
+    assert "BTC/USDT" in bot._traded_pairs
+    # позиция ушла (напр. закрылась) — повторно в ту же пару НЕ входим
+    bot.open_positions.clear()
+    await bot.poll_once(now=2000)
+    assert len(bot.open_positions) == 0  # one_shot: без повторений
+
+
 async def test_failed_entry_sets_cooldown(tmp_path):
     bot = _bot(tmp_path)
 

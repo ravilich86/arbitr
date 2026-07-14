@@ -196,3 +196,61 @@ class SessionSummary:
             f"P&L={d['total_pnl']} USDT средний={d['avg_pnl']} "
             f"пропущено сигналов={d['skipped_signals']}"
         )
+
+
+# --------------------------------------------------------------------------
+#  История сделок из лога (для команды --history)
+# --------------------------------------------------------------------------
+def load_trades(path: str) -> list[dict]:
+    """Прочитать лог сделок (jsonl). Пустой список, если файла нет."""
+    p = Path(path)
+    if not p.exists():
+        return []
+    rows: list[dict] = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:  # noqa: BLE001
+            continue
+    return rows
+
+
+def summarize_trades(path: str, last: int = 15) -> str:
+    """Человекочитаемая сводка по логу сделок: итоги + последние N сделок."""
+    rows = load_trades(path)
+    if not rows:
+        return f"История: лог сделок пуст или не найден ({path})"
+
+    def pnl(r: dict) -> float:
+        return float(r.get("pnl_usdt") or 0.0)
+
+    total = sum(pnl(r) for r in rows)
+    wins = sum(1 for r in rows if pnl(r) > 0)
+    losses = len(rows) - wins
+
+    # по парам
+    by_pair: dict[str, tuple[int, float]] = {}
+    for r in rows:
+        sym = r.get("symbol", "?")
+        cnt, s = by_pair.get(sym, (0, 0.0))
+        by_pair[sym] = (cnt + 1, s + pnl(r))
+    top_pairs = sorted(by_pair.items(), key=lambda x: x[1][0], reverse=True)[:10]
+
+    lines = [
+        f"История сделок ({path}):",
+        f"  всего={len(rows)} прибыльных={wins} убыточных={losses} "
+        f"суммарный P&L={total:+.4f} USDT",
+        "  по парам (число сделок, P&L):",
+    ]
+    for sym, (cnt, s) in top_pairs:
+        lines.append(f"    {sym}: {cnt} сделок, P&L={s:+.4f}")
+    lines.append(f"  последние {min(last, len(rows))}:")
+    for r in rows[-last:]:
+        lines.append(
+            f"    {r.get('symbol','?')} {r.get('exchange_high','?')}→"
+            f"{r.get('exchange_low','?')} P&L={pnl(r):+.4f} "
+            f"причина={r.get('close_reason','?')} leg={r.get('leg_status','?')}")
+    return "\n".join(lines)
