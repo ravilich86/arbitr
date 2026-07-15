@@ -574,8 +574,8 @@ class ArbitrageBot:
         ТОЛЬКО события открытия/закрытия позиций и КРИТИЧНЫЕ алерты о балансе;
         прочие (старт, аномалии, диагностика) — не шлём. В dry_run шлём всё.
         """
-        # Всегда шлём: сделки (entry/close) и баланс-алерт — важное исключение.
-        always = ("entry", "close", "balance")
+        # Всегда шлём: старт, сделки (entry/close) и баланс-алерт — важные события.
+        always = ("startup", "entry", "close", "balance")
         tg = self.config.telegram or {}
         live_only = tg.get("live_only_trades", True)
         if not self.config.dry_run and live_only and category not in always:

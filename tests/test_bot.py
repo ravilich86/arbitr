@@ -165,14 +165,16 @@ async def test_notify_event_policy_live_only(tmp_path):
     bot.notifier = _RecordingNotifier()
     bot.config.dry_run = False              # боевой режим
     bot.config.telegram = {"live_only_trades": True}
-    bot._notify_event("startup", "s")       # не должно уйти
+    bot._notify_event("startup", "s")       # старт — исключение, ДОЛЖНО уйти
     bot._notify_event("balance", "b")       # баланс — исключение, ДОЛЖНО уйти
     bot._notify_event("entry", "e")         # должно уйти
     bot._notify_event("close", "c")         # должно уйти
+    bot._notify_event("anomaly", "a")       # аномалия — НЕ должна уйти в бою
     await asyncio.sleep(0)
     assert "e" in bot.notifier.sent and "c" in bot.notifier.sent
+    assert "s" in bot.notifier.sent         # старт шлётся и в бою
     assert "b" in bot.notifier.sent         # баланс-алерт шлётся всегда
-    assert "s" not in bot.notifier.sent     # старт в боевом — нет
+    assert "a" not in bot.notifier.sent     # аномалия в боевом — нет
 
 
 async def test_notify_event_all_in_dry_run(tmp_path):
