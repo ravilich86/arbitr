@@ -595,16 +595,25 @@ def compute_pnl(
 
 
 def estimate_open_pnl(pos: Position, quote_high: Quote, quote_low: Quote,
-                      fee_rate_high: float = 0.0, fee_rate_low: float = 0.0) -> float:
-    """Оценка нереализованного P&L при закрытии по текущим ценам (для take-profit)."""
+                      fee_rate_high: float = 0.0, fee_rate_low: float = 0.0,
+                      slippage_pct: float = 0.0) -> float:
+    """Оценка нереализованного P&L при закрытии (для take-profit/stop-loss).
+
+    Закладываем проскальзывание закрытия: маркет-выход исполняется ХУЖЕ верхушки
+    стакана — откуп шорта дороже (ask*(1+slip)), продажа лонга дешевле
+    (bid*(1-slip)). Иначе take_profit срабатывает на «бумажной» прибыли, которая
+    исчезает при реальном исполнении (bid-ask спред + слиппедж на тонких парах).
+    """
     amount = min(pos.short_leg.filled_amount, pos.long_leg.filled_amount)
-    close_fees = amount * (quote_high.ask * fee_rate_high + quote_low.bid * fee_rate_low)
+    short_close = quote_high.ask * (1.0 + slippage_pct)   # откупаем дороже
+    long_close = quote_low.bid * (1.0 - slippage_pct)     # продаём дешевле
+    close_fees = amount * (short_close * fee_rate_high + long_close * fee_rate_low)
     return compute_pnl(
         short_entry=pos.short_leg.avg_price or 0.0,
         long_entry=pos.long_leg.avg_price or 0.0,
         amount=amount,
-        short_close=quote_high.ask,
-        long_close=quote_low.bid,
+        short_close=short_close,
+        long_close=long_close,
         entry_fees=pos.short_leg.fee_paid + pos.long_leg.fee_paid,
         close_fees=close_fees,
         funding_accrued=pos.funding_accrued,

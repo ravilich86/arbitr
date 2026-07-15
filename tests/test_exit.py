@@ -125,6 +125,17 @@ async def test_estimate_open_pnl():
     assert est > 0
 
 
+async def test_estimate_open_pnl_slippage_is_conservative():
+    ex = Executor(_connectors(), fees={"h": 0.0005, "l": 0.0005}, dry_run=True)
+    sig = ArbSignal("BTC/USDT", "h", "l", bid_high=101.0, ask_low=100.0,
+                    raw_spread=0.01, net_spread=0.005, notional=2000.0)
+    pos = await ex.open_position(sig)
+    qh, ql = q("h", 100.4, 100.4), q("l", 100.5, 100.6)
+    est0 = estimate_open_pnl(pos, qh, ql, slippage_pct=0.0)
+    est_slip = estimate_open_pnl(pos, qh, ql, slippage_pct=0.002)
+    assert est_slip < est0  # с учётом слиппеджа оценка прибыли ниже (реалистичнее)
+
+
 async def test_close_position_leg_fail_unhedged():
     conns = _connectors("fill", "fill")
     ex = Executor(conns, fees={"h": 0.0005, "l": 0.0005}, dry_run=False)

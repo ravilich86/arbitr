@@ -275,7 +275,8 @@ class ArbitrageBot:
             hold = now - (pos.open_time or now)
             fee_h = self.scanner.fees.get(pos.exchange_high, 0.0)
             fee_l = self.scanner.fees.get(pos.exchange_low, 0.0)
-            est_pnl = estimate_open_pnl(pos, qh, ql, fee_h, fee_l)
+            slip = self.config.sizing.get("max_slippage", 0.001)
+            est_pnl = estimate_open_pnl(pos, qh, ql, fee_h, fee_l, slippage_pct=slip)
             notional = pos.short_leg.notional or 1.0
             est_pnl_pct = est_pnl / notional if notional else None
 
@@ -347,7 +348,8 @@ class ArbitrageBot:
                 continue
             fee_h = self.scanner.fees.get(pos.exchange_high, 0.0)
             fee_l = self.scanner.fees.get(pos.exchange_low, 0.0)
-            est = estimate_open_pnl(pos, qh, ql, fee_h, fee_l)
+            slip = self.config.sizing.get("max_slippage", 0.001)
+            est = estimate_open_pnl(pos, qh, ql, fee_h, fee_l, slippage_pct=slip)
             if est < 0:
                 scored.append((est, pos, qh, ql))
         scored.sort(key=lambda x: x[0])  # самые убыточные первыми
