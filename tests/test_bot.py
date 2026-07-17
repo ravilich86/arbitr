@@ -218,6 +218,14 @@ async def test_harvest_skips_when_no_profit(tmp_path):
     assert len(bot.open_positions) == 1  # держим — нечем крыть убыток
 
 
+async def test_free_margin_uses_cache(tmp_path):
+    bot = _bot(tmp_path)
+    bot.config.dry_run = False
+    bot._balances = {"h": 55.0, "l": 90.0}   # фоновый кэш
+    fm = await bot._free_margin("h", "l")
+    assert fm == {"h": 55.0, "l": 90.0}       # берётся из кэша, без fetch_balance
+
+
 async def test_one_shot_per_pair(tmp_path):
     bot = _bot(tmp_path)
     bot.config.risk = {**bot.config.risk, "one_shot_per_pair": True}

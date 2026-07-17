@@ -157,6 +157,11 @@ async def test_prepare_leverage_steps_down():
     assert client.leverage_set == 5       # подобралось вниз до допустимого
     assert client.position_mode is False  # односторонний режим позиций
 
+    # повторный вызов по той же паре — из кэша, биржу не дёргаем
+    client.leverage_set = None
+    await ex._prepare_leverage("binance", "BTC/USDT", meta("binance"))
+    assert client.leverage_set is None    # плечо повторно НЕ ставилось
+
 
 async def test_place_leg_converts_base_to_contracts():
     from arb.exchanges import ExchangeConnector

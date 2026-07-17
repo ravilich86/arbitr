@@ -81,6 +81,9 @@ class ArbitrageBot:
         self._stream_tasks: list = []
         # Пары, уже отторгованные в этой сессии (one_shot_per_pair).
         self._traded_pairs: set = set()
+        # Кэш свободного баланса (USDT) по биржам — обновляется в фоне, чтобы вход
+        # не ждал fetch_balance.
+        self._balances: dict[str, float] = {}
 
     # ---- построение вселенной (§3–4) ----
     async def refresh_universe(self) -> None:
@@ -523,28 +526,40 @@ class ArbitrageBot:
                     signal.symbol, div, max_div)
         return True, None
 
+    @staticmethod
+    def _extract_free_usdt(bal: dict) -> float:
+        usdt = bal.get("USDT", {}) if isinstance(bal.get("USDT"), dict) else {}
+        free = usdt.get("free")
+        if free is None:
+            free = (bal.get("free", {}) or {}).get("USDT", 0)
+        return float(free or 0)
+
+    async def _refresh_balance(self, exchange: str) -> None:
+        try:
+            bal = await self.connectors[exchange].client.fetch_balance()
+            self._balances[exchange] = self._extract_free_usdt(bal)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Баланс %s недоступен: %s", exchange, exc)
+
+    async def _balance_loop(self, interval: float) -> None:
+        """Фоновое обновление свободного баланса по всем биржам."""
+        while self._running:
+            await asyncio.gather(*[self._refresh_balance(ex) for ex in self.connectors],
+                                 return_exceptions=True)
+            await asyncio.sleep(interval)
+
     async def _free_margin(self, *exchanges: str) -> dict[str, float]:
         """Свободная маржа (USDT) по биржам.
 
-        В dry_run считаем бюджет доступным (бюджет per-exchange из риска). В боевом
-        режиме — читаем реальный свободный баланс (fetch_balance)."""
+        В dry_run — бюджет per-exchange из риска. В боевом — из фонового кэша
+        (мгновенно). Если для биржи кэша ещё нет — однократно тянем сейчас."""
         if self.config.dry_run:
             cap = self.risk.max_position_per_exchange
             return {ex: cap for ex in exchanges}
-        result: dict[str, float] = {}
         for ex in exchanges:
-            client = self.connectors[ex].client
-            try:
-                bal = await client.fetch_balance()
-                usdt = bal.get("USDT", {}) if isinstance(bal.get("USDT"), dict) else {}
-                free = usdt.get("free")
-                if free is None:
-                    free = (bal.get("free", {}) or {}).get("USDT", 0)
-                result[ex] = float(free or 0)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Баланс %s недоступен: %s", ex, exc)
-                result[ex] = 0.0
-        return result
+            if ex not in self._balances:
+                await self._refresh_balance(ex)
+        return {ex: self._balances.get(ex, 0.0) for ex in exchanges}
 
     async def _total_balance(self) -> tuple[float, dict]:
         """Суммарный баланс USDT по всем биржам (equity). Для сводки после закрытия."""
@@ -876,6 +891,11 @@ class ArbitrageBot:
         """Цикл на WS: стримы в фоне непрерывно освежают кэш, цикл сканирует кэш."""
         await self.start_streams(funding_interval, subscribe_delay,
                                  symbols_per_stream, method)
+        # Фоновое обновление баланса (чтобы вход не ждал fetch_balance) — только в live.
+        if not self.config.dry_run:
+            bal_interval = float((self.config.risk.get("balance_refresh") or 30.0))
+            self._stream_tasks.append(
+                asyncio.create_task(self._balance_loop(bal_interval)))
         try:
             if warmup:
                 await asyncio.sleep(warmup)  # дать стримам наполнить кэш

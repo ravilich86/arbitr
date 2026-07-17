@@ -223,6 +223,9 @@ class Executor:
         self.simulate_slippage = simulate_slippage
         self.orderbook_limit = orderbook_limit
         self._clock = clock
+        # (биржа, символ), для которых плечо/маржа/режим позиций уже настроены в
+        # этой сессии — чтобы не дёргать биржу повторно и не тормозить вход.
+        self._prepared: set = set()
 
     # ---- служебное ----
     def _raw_symbol(self, exchange: str, symbol: str) -> str:
@@ -325,24 +328,39 @@ class Executor:
         """
         if self.dry_run:
             return
+        key = (exchange, symbol)
+        if key in self._prepared:
+            return  # уже настроено в этой сессии — не тормозим вход
         client = self.connectors[exchange].client
         raw_symbol = self._raw_symbol(exchange, symbol)
+        # Три независимые настройки — параллельно (быстрее, чем последовательно).
+        await asyncio.gather(
+            self._set_margin_mode(client, exchange, raw_symbol),
+            self._set_position_mode(client, exchange, raw_symbol),
+            self._set_leverage(client, exchange, symbol, raw_symbol, meta),
+            return_exceptions=True,
+        )
+        self._prepared.add(key)
 
-        # Режим маржи (best-effort; Gate и часть бирж не поддерживают в ccxt).
-        if hasattr(client, "set_margin_mode"):
-            try:
-                await client.set_margin_mode(self.margin_mode, raw_symbol)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("set_margin_mode %s: %s", exchange, exc)
+    async def _set_margin_mode(self, client, exchange, raw_symbol) -> None:
+        if not hasattr(client, "set_margin_mode"):
+            return
+        try:
+            await client.set_margin_mode(self.margin_mode, raw_symbol)
+        except Exception as exc:  # noqa: BLE001 - Gate и часть бирж не поддерживают
+            logger.debug("set_margin_mode %s: %s", exchange, exc)
 
+    async def _set_position_mode(self, client, exchange, raw_symbol) -> None:
         # Односторонний режим позиций (иначе Bybit: position idx not match).
-        if hasattr(client, "set_position_mode"):
-            try:
-                await client.set_position_mode(False, raw_symbol)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("set_position_mode %s: %s", exchange, exc)
+        if not hasattr(client, "set_position_mode"):
+            return
+        try:
+            await client.set_position_mode(False, raw_symbol)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("set_position_mode %s: %s", exchange, exc)
 
-        # Плечо с авто-подбором вниз.
+    async def _set_leverage(self, client, exchange, symbol, raw_symbol, meta) -> None:
+        # Плечо с авто-подбором вниз (мелкие монеты не дают 20x).
         if not hasattr(client, "set_leverage"):
             return
         desired = int(min(self.leverage, meta.max_leverage or self.leverage))
@@ -356,7 +374,7 @@ class Executor:
             except Exception as exc:  # noqa: BLE001
                 msg = str(exc).lower()
                 if "leverage" in msg or "not valid" in msg or "-4028" in msg:
-                    continue  # пробуем меньшее плечо
+                    continue
                 logger.warning("set_leverage %s: %s", exchange, exc)
                 return
         logger.warning("Не удалось установить плечо на %s %s", exchange, symbol)
