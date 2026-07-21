@@ -81,6 +81,18 @@ def test_parse_order_filled():
     assert p["fee"] == 0.25
 
 
+def test_parse_order_reads_exchange_average_from_info():
+    # Binance/Gate иногда кладут среднюю цену только во внутреннее info-поле.
+    p = parse_order({
+        "id": "1", "status": "closed", "filled": "5", "amount": "5",
+        "average": None, "price": "0", "info": {"avgPrice": "100.25"},
+        "fee": {"cost": "0.25"},
+    })
+    assert p["status"] == LegStatus.FILLED
+    assert p["avg_price"] == pytest.approx(100.25)
+    assert p["fee"] == pytest.approx(0.25)
+
+
 def test_parse_order_rejected():
     p = parse_order({"id": "1", "status": "canceled", "filled": 0, "amount": 5})
     assert p["status"] == LegStatus.FAILED

@@ -148,11 +148,74 @@ def vwap_fill(levels: list, base_amount: float) -> Optional[tuple[float, float]]
     return cost / filled, filled
 
 
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _positive_float(value: Any) -> Optional[float]:
+    value = _to_float(value)
+    return value if value is not None and value > 0 else None
+
+
+def _order_info(order: dict) -> dict:
+    info = order.get("info") or {}
+    return info if isinstance(info, dict) else {}
+
+
+def _avg_price(order: dict, filled: float) -> Optional[float]:
+    """Достать среднюю цену из unified и raw-полей ccxt-ордеров."""
+    avg = _positive_float(order.get("average"))
+    if avg is not None:
+        return avg
+
+    info = _order_info(order)
+    for key in (
+        "avgPrice", "avg_price", "avgPx", "priceAvg", "dealAvgPrice",
+        "fill_price", "fillPrice", "fillPx", "trade_avg_price",
+    ):
+        avg = _positive_float(info.get(key))
+        if avg is not None:
+            return avg
+
+    cost = _positive_float(order.get("cost"))
+    if cost is not None and filled > 0:
+        return cost / filled
+
+    return _positive_float(order.get("price"))
+
+
+def _filled_amount(order: dict) -> float:
+    filled = _positive_float(order.get("filled"))
+    if filled is not None:
+        return filled
+
+    info = _order_info(order)
+    for key in (
+        "executedQty", "cumExecQty", "accFillSz", "fillSz", "dealVol",
+        "filledSize", "filled_size",
+    ):
+        filled = _positive_float(info.get(key))
+        if filled is not None:
+            return filled
+
+    # Некоторые create_order отвечают только status=closed + amount. Для market
+    # ордера это лучше, чем считать filled=0 и терять открытую ногу.
+    amount = _positive_float(order.get("amount"))
+    if order.get("status") == "closed" and amount is not None:
+        return amount
+    return 0.0
+
+
 def parse_order(order: dict) -> dict:
     """Нормализовать ccxt-ответ ордера -> {filled, avg_price, id, status, fee}."""
-    filled = order.get("filled") or 0.0
-    amount = order.get("amount") or 0.0
-    avg = order.get("average") or order.get("price")
+    filled = _filled_amount(order)
+    amount = _positive_float(order.get("amount")) or 0.0
+    avg = _avg_price(order, filled)
     raw_status = order.get("status")
 
     if raw_status == "closed" or (filled and amount and filled >= amount * 0.999):
@@ -167,18 +230,18 @@ def parse_order(order: dict) -> dict:
     fee = 0.0
     fee_obj = order.get("fee") or {}
     if isinstance(fee_obj, dict):
-        fee = fee_obj.get("cost") or 0.0
+        fee = _to_float(fee_obj.get("cost")) or 0.0
     fees_list = order.get("fees") or []
     for f in fees_list:
         if isinstance(f, dict) and f.get("cost"):
-            fee += f["cost"]
+            fee += _to_float(f.get("cost")) or 0.0
 
     return {
-        "filled": float(filled),
-        "avg_price": float(avg) if avg else None,
+        "filled": filled,
+        "avg_price": avg,
         "id": order.get("id"),
         "status": status,
-        "fee": float(fee),
+        "fee": fee,
     }
 
 
@@ -238,6 +301,38 @@ class Executor:
         conn = self.connectors.get(exchange)
         return conn.contracts.get(symbol) if conn else None
 
+    async def _fetch_order_details(self, client, raw_symbol: str,
+                                   order_id: Optional[str]) -> Optional[dict]:
+        """Однократно дочитать ордер, если create_order вернул неполные поля."""
+        if not order_id or not hasattr(client, "fetch_order"):
+            return None
+        try:
+            return await asyncio.wait_for(
+                client.fetch_order(order_id, raw_symbol),
+                timeout=self.leg_timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("fetch_order %s %s: %s", raw_symbol, order_id, exc)
+            return None
+
+    @staticmethod
+    def _merge_order(primary: dict, secondary: Optional[dict]) -> dict:
+        """Слить первичный create_order и уточнение fetch_order без дубля комиссий."""
+        if not secondary:
+            return primary
+        out = dict(primary)
+        if secondary["filled"] > 0:
+            out["filled"] = secondary["filled"]
+        if secondary["avg_price"] is not None:
+            out["avg_price"] = secondary["avg_price"]
+        if secondary["status"] != LegStatus.PENDING:
+            out["status"] = secondary["status"]
+        if secondary["fee"] > 0:
+            out["fee"] = secondary["fee"]
+        if secondary["id"]:
+            out["id"] = secondary["id"]
+        return out
+
     async def _place_leg(
         self, exchange: str, symbol: str, side: Side, amount: float,
         ref_price: float, reduce_only: bool = False,
@@ -284,6 +379,16 @@ class Executor:
                 timeout=self.leg_timeout,
             )
             parsed = parse_order(order)
+            if (parsed["filled"] <= 0 or parsed["avg_price"] is None
+                    or parsed["status"] == LegStatus.PENDING):
+                fetched = await self._fetch_order_details(client, raw_symbol, parsed["id"])
+                parsed = self._merge_order(parsed, parse_order(fetched) if fetched else None)
+            if parsed["filled"] > 0 and parsed["avg_price"] is None:
+                parsed["avg_price"] = ref_price
+                logger.warning(
+                    "Ордер %s %s без средней цены; использую ref_price=%g",
+                    exchange, symbol, ref_price,
+                )
             # filled приходит в контрактах -> возвращаем в базовый актив.
             leg.filled_amount = parsed["filled"] * cs
             leg.avg_price = parsed["avg_price"]
@@ -536,12 +641,15 @@ class Executor:
 
         pos.short_leg.status = LegStatus.CLOSED
         pos.long_leg.status = LegStatus.CLOSED
+        short_entry, long_entry = _position_entry_prices(pos)
+        short_close = close_short.avg_price if close_short.avg_price is not None else quote_high.ask
+        long_close = close_long.avg_price if close_long.avg_price is not None else quote_low.bid
         pos.realized_pnl = compute_pnl(
-            short_entry=pos.short_leg.avg_price or 0.0,
-            long_entry=pos.long_leg.avg_price or 0.0,
+            short_entry=short_entry,
+            long_entry=long_entry,
             amount=amount,
-            short_close=close_short.avg_price or 0.0,
-            long_close=close_long.avg_price or 0.0,
+            short_close=short_close,
+            long_close=long_close,
             entry_fees=pos.short_leg.fee_paid + pos.long_leg.fee_paid,
             close_fees=close_short.fee_paid + close_long.fee_paid,
             funding_accrued=pos.funding_accrued,
@@ -550,6 +658,17 @@ class Executor:
         pos.close_time = self._clock()
         pos.close_reason = reason
         return pos
+
+
+def _position_entry_prices(pos: Position) -> tuple[float, float]:
+    """Цены входа для P&L: факт исполнения, а если биржа не вернула его — сигнал."""
+    short_entry = pos.short_leg.avg_price
+    long_entry = pos.long_leg.avg_price
+    if short_entry is None and pos.signal is not None:
+        short_entry = pos.signal.bid_high
+    if long_entry is None and pos.signal is not None:
+        long_entry = pos.signal.ask_low
+    return short_entry or 0.0, long_entry or 0.0
 
 
 def current_spread(quote_high: Quote, quote_low: Quote) -> float:
@@ -623,12 +742,13 @@ def estimate_open_pnl(pos: Position, quote_high: Quote, quote_low: Quote,
     исчезает при реальном исполнении (bid-ask спред + слиппедж на тонких парах).
     """
     amount = min(pos.short_leg.filled_amount, pos.long_leg.filled_amount)
+    short_entry, long_entry = _position_entry_prices(pos)
     short_close = quote_high.ask * (1.0 + slippage_pct)   # откупаем дороже
     long_close = quote_low.bid * (1.0 - slippage_pct)     # продаём дешевле
     close_fees = amount * (short_close * fee_rate_high + long_close * fee_rate_low)
     return compute_pnl(
-        short_entry=pos.short_leg.avg_price or 0.0,
-        long_entry=pos.long_leg.avg_price or 0.0,
+        short_entry=short_entry,
+        long_entry=long_entry,
         amount=amount,
         short_close=short_close,
         long_close=long_close,

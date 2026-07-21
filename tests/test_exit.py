@@ -10,7 +10,7 @@ from arb.executor import (
     should_exit,
 )
 from arb.exchanges import ExchangeConnector
-from arb.models import ArbSignal, ContractMeta, PositionStatus, Quote
+from arb.models import ArbSignal, ContractMeta, Leg, Position, PositionStatus, Quote, Side
 from tests.fixtures import MockTradeClient
 
 
@@ -134,6 +134,33 @@ async def test_estimate_open_pnl_slippage_is_conservative():
     est0 = estimate_open_pnl(pos, qh, ql, slippage_pct=0.0)
     est_slip = estimate_open_pnl(pos, qh, ql, slippage_pct=0.002)
     assert est_slip < est0  # с учётом слиппеджа оценка прибыли ниже (реалистичнее)
+
+
+def test_estimate_open_pnl_uses_signal_price_when_average_missing():
+    # Если биржа не вернула average по одной ноге, нельзя считать её вход по нулю:
+    # это давало ложный take_profit сразу после входа и закрытие в минус.
+    amount = 100_000.0
+    sig = ArbSignal(
+        "HMSTR/USDT", "gate", "binance",
+        bid_high=0.000177, ask_low=0.0001744,
+        raw_spread=0.0149, net_spread=0.0109, notional=20.0,
+    )
+    pos = Position(
+        "p", "HMSTR/USDT", "gate", "binance",
+        Leg("gate", "HMSTR/USDT", Side.SHORT, amount,
+            filled_amount=amount, avg_price=0.000177, fee_paid=0.01),
+        Leg("binance", "HMSTR/USDT", Side.LONG, amount,
+            filled_amount=amount, avg_price=None, fee_paid=0.01),
+        signal=sig,
+    )
+    est = estimate_open_pnl(
+        pos,
+        Quote("gate", "HMSTR/USDT", bid=0.000177, ask=0.0001772),
+        Quote("binance", "HMSTR/USDT", bid=0.0001743, ask=0.0001744),
+        fee_rate_high=0.0005,
+        fee_rate_low=0.0005,
+    )
+    assert est < 0
 
 
 async def test_close_position_leg_fail_unhedged():
