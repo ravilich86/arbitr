@@ -562,7 +562,11 @@ class Executor:
         await self._rollback(pos)
 
     async def _equalize(self, pos: Position) -> None:
-        """Довести обе ноги до одинакового исполненного объёма (§7)."""
+        """Довести обе ноги до одинакового исполненного объёма (§7).
+
+        Излишек откупается/продаётся reduce-only; комиссия и P&L этого микро-трейда
+        добавляются в позицию, чтобы не было утечки.
+        """
         s, l = pos.short_leg, pos.long_leg
         diff = round(s.filled_amount - l.filled_amount, 12)
         if diff == 0:
@@ -573,13 +577,23 @@ class Executor:
                                           pos.signal.bid_high if pos.signal else 0.0,
                                           reduce_only=True)
             if extra.is_filled:
+                # P&L откупленной части: продали по avg_price, откупили по extra.avg_price
+                pnl_piece = (s.avg_price or 0.0) - (extra.avg_price or 0.0)
+                pnl_piece = pnl_piece * extra.filled_amount - extra.fee_paid
+                pos.equalize_pnl += pnl_piece
                 s.filled_amount -= extra.filled_amount
+                s.fee_paid += extra.fee_paid
         else:  # long больше -> продаём излишек long
             extra = await self._place_leg(l.exchange, l.symbol, Side.SHORT, -diff,
                                           pos.signal.ask_low if pos.signal else 0.0,
                                           reduce_only=True)
             if extra.is_filled:
+                # P&L проданной части: купили по avg_price, продали по extra.avg_price
+                pnl_piece = (extra.avg_price or 0.0) - (l.avg_price or 0.0)
+                pnl_piece = pnl_piece * extra.filled_amount - extra.fee_paid
+                pos.equalize_pnl += pnl_piece
                 l.filled_amount -= extra.filled_amount
+                l.fee_paid += extra.fee_paid
 
     async def _retry_missing_leg(self, pos: Position) -> None:
         """Довыставить недостающую ногу (on_leg_failure=retry)."""
@@ -653,7 +667,7 @@ class Executor:
             entry_fees=pos.short_leg.fee_paid + pos.long_leg.fee_paid,
             close_fees=close_short.fee_paid + close_long.fee_paid,
             funding_accrued=pos.funding_accrued,
-        )
+        ) + pos.equalize_pnl
         pos.status = PositionStatus.CLOSED
         pos.close_time = self._clock()
         pos.close_reason = reason

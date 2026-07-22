@@ -319,8 +319,10 @@ class Scanner:
         funding_income = expected_net_funding(
             funding_high, funding_low, self.hold_hours, self.default_funding_interval_hours
         )
-        # Слиппедж: оценка из стакана, иначе консервативно max_slippage на обе ноги входа.
-        slip = est_slippage if est_slippage is not None else self.max_slippage * 2
+        # Слиппедж: оценка из стакана, иначе консервативно max_slippage на все 4 ноги
+        # (2 входа + 2 выхода). Без выходного слиппеджа net_spread завышен, и бот
+        # заходит в сделки, которые не переживают реального выхода.
+        slip = est_slippage if est_slippage is not None else self.max_slippage * 4
         net = net_spread(raw, fee_cost, slip, funding_income)
 
         signal = ArbSignal(

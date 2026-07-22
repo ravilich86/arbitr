@@ -182,6 +182,7 @@ class Position:
     close_time: Optional[float] = None
     close_reason: Optional[str] = None
     funding_accrued: float = 0.0        # начисленный funding за удержание (USDT)
+    equalize_pnl: float = 0.0           # P&L выравнивания ног при входе (USDT)
     realized_pnl: Optional[float] = None  # итоговый P&L (USDT)
 
     @property
