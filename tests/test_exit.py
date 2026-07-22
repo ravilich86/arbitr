@@ -47,6 +47,25 @@ def test_should_exit_take_profit():
     assert ok and reason == "take_profit"
 
 
+def test_stop_loss_not_triggered_right_after_entry():
+    # Позиция сразу после входа уже в минусе на издержки (-0.8%). Стоп 0.5% НЕ
+    # должен срабатывать мгновенно — считаем просадку от точки входа.
+    ok, reason = should_exit(cur_spread=0.012, hold_time=2, exit_spread=0.0,
+                             max_hold_time=3600, max_adverse_spread=0.02,
+                             est_pnl_pct=-0.008, stop_loss_pct=0.005,
+                             entry_pnl_pct=-0.008)
+    assert not ok
+
+
+def test_stop_loss_triggers_on_drawdown_from_entry():
+    # Просело ещё на 0.6% от точки входа (-0.008 -> -0.014) при стопе 0.5%
+    ok, reason = should_exit(cur_spread=0.02, hold_time=30, exit_spread=0.0,
+                             max_hold_time=3600, max_adverse_spread=0.05,
+                             est_pnl_pct=-0.014, stop_loss_pct=0.005,
+                             entry_pnl_pct=-0.008)
+    assert ok and reason == "stop_loss"
+
+
 def test_should_exit_stop_loss():
     ok, reason = should_exit(cur_spread=0.008, hold_time=10, exit_spread=0.0,
                              max_hold_time=3600, max_adverse_spread=0.02,

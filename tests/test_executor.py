@@ -50,6 +50,16 @@ def test_compute_min_base_satisfies_both():
     assert amt * 100.0 >= 100.0  # >= min_notional b
 
 
+def test_min_base_accounts_contract_size():
+    # Gate/OKX: минимум 1 КОНТРАКТ, contractSize=10 -> минимум 10 в базе.
+    m = ContractMeta("gate", "X/USDT", "X/USDT:USDT", "X", "USDT",
+                     step_size=1.0, min_amount=1.0, min_notional=0.0,
+                     max_leverage=20, contract_size=10.0)
+    amt = compute_min_base(price=1.0, meta_high=m, meta_low=m)
+    assert amt >= 10.0                 # 1 контракт = 10 базовых единиц
+    assert amt / 10.0 >= 1.0           # в контрактах >= 1 -> биржа примет
+
+
 def test_compute_min_base_rounds_up_to_step():
     a = meta("a", step=1.0, min_amount=0.3, min_notional=0)
     b = meta("b", step=1.0, min_amount=0.0, min_notional=0)

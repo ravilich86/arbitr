@@ -192,6 +192,10 @@ class Position:
     # слиппеджа выхода: факт исполнения против верхушки стакана.
     exit_quote_ask_high: Optional[float] = None
     exit_quote_bid_low: Optional[float] = None
+    # Нереализованный P&L (доля нотионала) сразу после входа. Позиция стартует в
+    # минусе по построению (пересечение bid-ask обеих бирж + комиссии), поэтому
+    # стоп-лосс считается как просадка ОТ этой точки, а не от нуля.
+    entry_pnl_pct: Optional[float] = None
 
     @property
     def legs(self) -> tuple[Leg, Leg]:

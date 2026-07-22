@@ -284,6 +284,10 @@ class ArbitrageBot:
             est_pnl = estimate_open_pnl(pos, qh, ql, fee_h, fee_l, slippage_pct=slip)
             notional = pos.short_leg.notional or 1.0
             est_pnl_pct = est_pnl / notional if notional else None
+            # Базовая точка: P&L сразу после входа (позиция стартует в минусе на
+            # величину издержек). Стоп считается как просадка от неё.
+            if pos.entry_pnl_pct is None:
+                pos.entry_pnl_pct = est_pnl_pct
 
             exit_now, reason = should_exit(
                 cur_spread=cur, hold_time=hold,
@@ -293,12 +297,17 @@ class ArbitrageBot:
                 est_pnl_pct=est_pnl_pct,
                 take_profit_pct=self.config.spread.get("take_profit_pct"),
                 stop_loss_pct=self.config.spread.get("stop_loss_pct"),
+                entry_pnl_pct=pos.entry_pnl_pct,
             )
-            # риск-контроль ликвидации может форсировать закрытие (§9)
-            liq = self.risk.check_liquidation(pos, qh.bid, ql.ask)
-            if not liq.allowed:
-                exit_now, reason = True, "liquidation_buffer"
-                logger.warning("Позиция %s: %s", pos.symbol, liq.reason)
+            # Риск-контроль ликвидации (§9). При КРОСС-марже неприменим: ликвидация
+            # считается по счёту целиком, а не по отдельной позиции — иначе даёт
+            # ложные срабатывания сразу после входа.
+            if (self.config.sizing.get("margin_mode", "isolated") != "cross"
+                    and self.config.risk.get("liquidation_check", True)):
+                liq = self.risk.check_liquidation(pos, qh.bid, ql.ask)
+                if not liq.allowed:
+                    exit_now, reason = True, "liquidation_buffer"
+                    logger.warning("Позиция %s: %s", pos.symbol, liq.reason)
 
             if exit_now:
                 await self._close_position(pos, qh, ql, reason or "target", now,

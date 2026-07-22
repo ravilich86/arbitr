@@ -53,27 +53,40 @@ def _ceil_to_step(amount: float, step: Optional[float]) -> float:
     return math.ceil(amount / step) * step
 
 
+def base_min_amount(meta: ContractMeta, price: float) -> float:
+    """Минимальный объём биржи В БАЗОВОМ АКТИВЕ.
+
+    Важно: limits.amount.min и precision.amount у контрактных бирж заданы В
+    КОНТРАКТАХ (напр. Gate/OKX: минимум 1 контракт), поэтому переводим их в базу
+    умножением на contractSize. Иначе объём выходит меньше 1 контракта и биржа
+    отбивает ордер («amount must be greater than minimum amount precision of 1»).
+    """
+    cs = meta.contract_size or 1.0
+    need = 0.0
+    if meta.min_amount:
+        need = max(need, meta.min_amount * cs)
+    if meta.min_notional and price > 0:
+        need = max(need, meta.min_notional / price)
+    return need
+
+
+def base_step(meta: ContractMeta) -> float:
+    """Шаг лота биржи в базовом активе (перевод из контрактов)."""
+    cs = meta.contract_size or 1.0
+    return (meta.step_size or 0.0) * cs
+
+
 def compute_min_base(
     price: float, meta_high: ContractMeta, meta_low: ContractMeta,
 ) -> float:
-    """Минимально возможный объём (база), удовлетворяющий минимумам ОБЕИХ бирж.
-
-    Берём максимум из min_amount и min_notional/цена по обеим биржам и округляем
-    ВВЕРХ под шаг лота (чтобы не упасть ниже минимума). Нужна крошечная маржа.
-    """
+    """Минимально возможный объём (база), удовлетворяющий минимумам ОБЕИХ бирж."""
     if price <= 0:
         return 0.0
-    need = 0.0
-    for meta in (meta_high, meta_low):
-        if meta.min_amount:
-            need = max(need, meta.min_amount)
-        if meta.min_notional:
-            need = max(need, meta.min_notional / price)
+    need = max(base_min_amount(meta_high, price), base_min_amount(meta_low, price))
+    step = max(base_step(meta_high), base_step(meta_low))
     if need <= 0:
-        need = max(meta_high.step_size or 0.0, meta_low.step_size or 0.0)
-    step = max(meta_high.step_size or 0.0, meta_low.step_size or 0.0)
-    amount = _ceil_to_step(need, step) if step > 0 else need
-    return amount
+        need = step
+    return _ceil_to_step(need, step) if step > 0 else need
 
 
 def compute_base_amount(
@@ -92,20 +105,18 @@ def compute_base_amount(
         return 0.0
 
     target = notional / price
-    # Округляем вниз под каждый шаг и берём минимум (кратно обоим при кратных шагах)
-    a_high = _floor_to_step(target, meta_high.step_size)
-    a_low = _floor_to_step(target, meta_low.step_size)
-    amount = min(a_high, a_low)
-    amount = _floor_to_step(amount, meta_high.step_size)
-    amount = _floor_to_step(amount, meta_low.step_size)
+    # Шаги лота переводим из контрактов в базу (contractSize), иначе объём
+    # получится неверным на биржах, где количество задаётся в контрактах.
+    step_h, step_l = base_step(meta_high), base_step(meta_low)
+    amount = min(_floor_to_step(target, step_h), _floor_to_step(target, step_l))
+    amount = _floor_to_step(amount, step_h)
+    amount = _floor_to_step(amount, step_l)
     if amount <= 0:
         return 0.0
 
-    # Проверка минимумов обеих бирж
+    # Проверка минимумов обеих бирж (в базовом активе)
     for meta in (meta_high, meta_low):
-        if meta.min_amount and amount < meta.min_amount:
-            return 0.0
-        if meta.min_notional and amount * price < meta.min_notional:
+        if amount < base_min_amount(meta, price):
             return 0.0
     return amount
 
@@ -718,6 +729,7 @@ def should_exit(
     est_pnl_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
     stop_loss_pct: Optional[float] = None,
+    entry_pnl_pct: Optional[float] = None,
 ) -> tuple[bool, Optional[str]]:
     """Решить, пора ли закрывать позицию, и по какой причине (§7).
 
@@ -733,8 +745,13 @@ def should_exit(
         return True, "take_profit"
     if cur_spread <= exit_spread and (est_pnl_pct is None or est_pnl_pct >= 0):
         return True, "target"
-    if stop_loss_pct is not None and est_pnl_pct is not None and est_pnl_pct <= -stop_loss_pct:
-        return True, "stop_loss"
+    # Стоп-лосс — просадка ОТ точки входа. Позиция сразу после открытия уже в
+    # минусе на величину издержек, поэтому абсолютный порог давал мгновенный
+    # стоп-аут в первую же секунду, не давая спреду сойтись.
+    if stop_loss_pct is not None and est_pnl_pct is not None:
+        baseline = entry_pnl_pct if entry_pnl_pct is not None else 0.0
+        if est_pnl_pct <= baseline - stop_loss_pct:
+            return True, "stop_loss"
     if cur_spread >= max_adverse_spread:
         return True, "max_adverse"
     if hold_time >= max_hold_time:
