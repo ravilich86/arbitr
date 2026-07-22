@@ -55,6 +55,62 @@ def _fmt_pct(v: Optional[float]) -> str:
     return f"{v * 100:+.3f}%" if v is not None else "н/д"
 
 
+def compare_report(orders: list[dict]) -> str:
+    """Сверка наших записей с фактом биржи (после --sync-fills).
+
+    Показывает, врут ли наши цены/комиссии/объёмы. Если расхождения близки к нулю —
+    записи верны, и потери реальны (исполнение/спред). Если большие — проблема в
+    том, что мы записываем, и аналитике верить нельзя.
+    """
+    synced = [o for o in orders if o.get("actual_avg_price") or o.get("actual_filled")]
+    if not synced:
+        return ("Сверка с биржами: нет синхронизированных ордеров "
+                "(запусти: python -m arb.main --sync-fills)")
+
+    price_diffs, fee_diffs, amt_diffs = [], [], []
+    for o in synced:
+        rec_p, act_p = o.get("avg_price"), o.get("actual_avg_price")
+        if rec_p and act_p:
+            price_diffs.append((act_p - rec_p) / rec_p)
+        rec_f, act_f = o.get("fee_paid"), o.get("actual_fee")
+        if act_f is not None and rec_f is not None:
+            fee_diffs.append(act_f - rec_f)
+        rec_a, act_a = o.get("filled_amount"), o.get("actual_filled")
+        if rec_a and act_a:
+            amt_diffs.append((act_a - rec_a) / rec_a)
+
+    lines = [
+        "=== СВЕРКА С ИСТОРИЕЙ БИРЖ ===",
+        f"Сверено ордеров: {len(synced)} из {len(orders)}",
+        f"  Расхождение ЦЕНЫ (факт vs наша запись):  среднее {_fmt_pct(_avg(price_diffs))}"
+        f", макс {_fmt_pct(max(price_diffs, key=abs) if price_diffs else None)}",
+        f"  Расхождение ОБЪЁМА:                      среднее {_fmt_pct(_avg(amt_diffs))}",
+    ]
+    if fee_diffs:
+        lines.append(f"  Расхождение КОМИССИИ (факт − наша):       "
+                     f"сумма {sum(fee_diffs):+.6f}, среднее {_avg(fee_diffs):+.6f}")
+    worst = sorted(
+        (o for o in synced if o.get("avg_price") and o.get("actual_avg_price")),
+        key=lambda o: abs((o["actual_avg_price"] - o["avg_price"]) / o["avg_price"]),
+        reverse=True)[:5]
+    if worst:
+        lines.append("  Худшие расхождения по цене:")
+        for o in worst:
+            d = (o["actual_avg_price"] - o["avg_price"]) / o["avg_price"]
+            lines.append(f"    {o['exchange']} {o['symbol']} [{o['role']}]: "
+                         f"наша {o['avg_price']:g} vs факт {o['actual_avg_price']:g} "
+                         f"({d * 100:+.3f}%)")
+    avg_price_diff = _avg(price_diffs)
+    lines.append("")
+    if avg_price_diff is not None and abs(avg_price_diff) < 0.0005:
+        lines.append("  Вывод: наши записи совпадают с биржей — потери реальные "
+                     "(исполнение/спред), а не ошибка учёта.")
+    else:
+        lines.append("  Вывод: записи РАСХОДЯТСЯ с биржей — сначала чиним учёт цен, "
+                     "аналитике P&L пока верить нельзя.")
+    return "\n".join(lines)
+
+
 def analyze(positions: list[dict]) -> str:
     """Собрать текстовый отчёт по закрытым позициям."""
     closed = [p for p in positions if p.get("realized_pnl") is not None]

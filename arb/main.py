@@ -22,10 +22,11 @@ from .marketdata import MarketData
 from .notifier import build_notifier
 from .reconcile import close_all, reconcile
 from .risk import RiskManager
-from .analytics import analyze
+from .analytics import analyze, compare_report
 from .scanner import PersistenceTracker, Scanner
 from .state import PositionStore
 from .storage import TradeDB
+from .sync import sync_fills
 
 
 def build_bot(config: Config, connectors=None) -> ArbitrageBot:
@@ -120,12 +121,32 @@ async def _run(args) -> None:
         level=config.logging.get("level", "INFO"),
     )
     _install_ws_noise_filter(log)
+    # Сверка наших записей с фактической историей бирж.
+    if getattr(args, "sync_fills", False):
+        state_cfg = config.raw.get("state", {}) or {}
+        db = TradeDB(state_cfg.get("db_file", "data/trades.db"))
+        connectors = create_connectors(config)
+        try:
+            # рынки нужны, чтобы знать биржевые символы и contractSize
+            await asyncio.gather(*[c.load_perp_contracts() for c in connectors.values()],
+                                 return_exceptions=True)
+            res = await sync_fills(db, connectors)
+            log.info("Сверка с биржами: проверено %d, обновлено %d",
+                     res["checked"], res["synced"])
+            log.info("\n%s", compare_report(db.orders()))
+        finally:
+            db.close()
+            for conn in connectors.values():
+                await conn.close()
+        return
+
     # Аналитика по БД: куда уходят деньги.
     if getattr(args, "analyze", False):
         state_cfg = config.raw.get("state", {}) or {}
         db = TradeDB(state_cfg.get("db_file", "data/trades.db"))
         try:
             log.info("\n%s", analyze(db.positions()))
+            log.info("\n%s", compare_report(db.orders()))
         finally:
             db.close()
         return
@@ -211,6 +232,8 @@ def main() -> None:
                         help="показать сводку истории сделок из лога и выйти")
     parser.add_argument("--analyze", action="store_true",
                         help="анализ сделок из БД: куда уходят деньги, и выйти")
+    parser.add_argument("--sync-fills", action="store_true",
+                        help="сверить записи с фактической историей бирж и выйти")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)

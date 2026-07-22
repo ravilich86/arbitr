@@ -66,7 +66,42 @@ class TradeDB:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        self._ensure_order_columns()
         self.conn.commit()
+
+    # Колонки с ФАКТИЧЕСКИМИ данными биржи (заполняются сверкой --sync-fills).
+    _ORDER_EXTRA = {
+        "actual_filled": "REAL",          # исполнено по данным биржи (в базе)
+        "actual_avg_price": "REAL",       # реальная средняя цена исполнения
+        "actual_fee": "REAL",             # реальная комиссия
+        "actual_fee_currency": "TEXT",
+        "synced_at": "REAL",
+    }
+
+    def _ensure_order_columns(self) -> None:
+        have = {r["name"] for r in self.conn.execute("PRAGMA table_info(orders)")}
+        for col, typ in self._ORDER_EXTRA.items():
+            if col not in have:
+                self.conn.execute(f"ALTER TABLE orders ADD COLUMN {col} {typ}")
+
+    def unsynced_orders(self, limit: int = 500) -> list[dict]:
+        """Ордера с биржевым id, ещё не сверенные с историей биржи."""
+        rows = self.conn.execute(
+            "SELECT * FROM orders WHERE order_id IS NOT NULL AND order_id != ''"
+            " AND synced_at IS NULL ORDER BY ts DESC LIMIT ?", (limit,))
+        return [dict(r) for r in rows.fetchall()]
+
+    def update_order_actuals(self, row_id: int, filled: Optional[float],
+                             avg_price: Optional[float], fee: Optional[float],
+                             fee_currency: Optional[str]) -> None:
+        try:
+            self.conn.execute(
+                "UPDATE orders SET actual_filled=?, actual_avg_price=?, actual_fee=?,"
+                " actual_fee_currency=?, synced_at=? WHERE id=?",
+                (filled, avg_price, fee, fee_currency, time.time(), row_id))
+            self.conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось обновить ордер %s: %s", row_id, exc)
 
     def close(self) -> None:
         try:
