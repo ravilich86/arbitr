@@ -530,6 +530,9 @@ class Executor:
         )
         pos.short_leg = short_leg
         pos.long_leg = long_leg
+        short_leg.role = long_leg.role = "entry"
+        short_leg.ts = long_leg.ts = self._clock()
+        pos.orders.extend([short_leg, long_leg])
 
         await self._resolve_legs(pos)
         return pos
@@ -576,6 +579,9 @@ class Executor:
             extra = await self._place_leg(s.exchange, s.symbol, Side.LONG, diff,
                                           pos.signal.bid_high if pos.signal else 0.0,
                                           reduce_only=True)
+            extra.role = "equalize"
+            extra.ts = self._clock()
+            pos.orders.append(extra)
             if extra.is_filled:
                 # P&L откупленной части: продали по avg_price, откупили по extra.avg_price
                 pnl_piece = (s.avg_price or 0.0) - (extra.avg_price or 0.0)
@@ -587,6 +593,9 @@ class Executor:
             extra = await self._place_leg(l.exchange, l.symbol, Side.SHORT, -diff,
                                           pos.signal.ask_low if pos.signal else 0.0,
                                           reduce_only=True)
+            extra.role = "equalize"
+            extra.ts = self._clock()
+            pos.orders.append(extra)
             if extra.is_filled:
                 # P&L проданной части: купили по avg_price, продали по extra.avg_price
                 pnl_piece = (extra.avg_price or 0.0) - (l.avg_price or 0.0)
@@ -616,6 +625,9 @@ class Executor:
                 closer = await self._place_leg(leg.exchange, leg.symbol, close_side,
                                                leg.filled_amount, ref or 0.0,
                                                reduce_only=True)
+                closer.role = "rollback"
+                closer.ts = self._clock()
+                pos.orders.append(closer)
                 if closer.is_filled:
                     leg.status = LegStatus.CLOSED
                 else:
@@ -638,6 +650,9 @@ class Executor:
         """
         pos.status = PositionStatus.CLOSING
         amount = min(pos.short_leg.filled_amount, pos.long_leg.filled_amount)
+        # Ожидаемые цены выхода (верхушка стакана) — для анализа слиппеджа выхода.
+        pos.exit_quote_ask_high = quote_high.ask
+        pos.exit_quote_bid_low = quote_low.bid
 
         close_short, close_long = await asyncio.gather(
             self._place_leg(pos.exchange_high, pos.symbol, Side.LONG, amount,
@@ -645,6 +660,9 @@ class Executor:
             self._place_leg(pos.exchange_low, pos.symbol, Side.SHORT, amount,
                             quote_low.bid, reduce_only=True),
         )
+        close_short.role = close_long.role = "exit"
+        close_short.ts = close_long.ts = self._clock()
+        pos.orders.extend([close_short, close_long])
 
         # leg-risk на выходе: если одна нога не закрылась — пометить и вернуть
         if not (close_short.is_filled and close_long.is_filled):

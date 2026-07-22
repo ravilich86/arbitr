@@ -56,6 +56,7 @@ class ArbitrageBot:
         summary: Optional[SessionSummary] = None,
         notifier=None,
         store=None,
+        db=None,
         clock=None,
     ):
         import time as _time
@@ -69,6 +70,7 @@ class ArbitrageBot:
         self.summary = summary or SessionSummary()
         self.notifier = notifier
         self.store = store
+        self.db = db  # TradeDB для аналитики (может быть None)
         self._clock = clock or _time.time
         self._bg_tasks: set = set()
 
@@ -319,6 +321,9 @@ class ArbitrageBot:
         logger.info("Закрыта %s: причина=%s P&L=%s", pos.symbol, reason, pos.realized_pnl)
         if self.store:
             self.store.remove(pos.id)
+        if self.db:  # полная запись в БД для анализа
+            self.db.record_position(pos, leverage=self.risk.leverage,
+                                    dry_run=self.config.dry_run)
         # Пункт 10: общий баланс всех бирж после закрытия любой позиции.
         total, parts = await self._total_balance()
         pstr = ", ".join(
@@ -452,6 +457,13 @@ class ArbitrageBot:
             pos = await self.executor.open_position(sig)
             pos.open_time = now  # единый источник времени для расчёта удержания
             self._traded_pairs.add(sig.symbol)  # one_shot: пара взята
+            if self.db:
+                entered = pos.status == PositionStatus.OPEN
+                self.db.record_signal(sig, entered,
+                                      None if entered else pos.close_reason, ts=now)
+                if not entered:  # неудачный вход тоже фиксируем со всеми ордерами
+                    self.db.record_position(pos, leverage=self.risk.leverage,
+                                            dry_run=self.config.dry_run)
             if pos.status == PositionStatus.OPEN:
                 self.open_positions.append(pos)
                 if self.notifier:

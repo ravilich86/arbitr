@@ -22,8 +22,10 @@ from .marketdata import MarketData
 from .notifier import build_notifier
 from .reconcile import close_all, reconcile
 from .risk import RiskManager
+from .analytics import analyze
 from .scanner import PersistenceTracker, Scanner
 from .state import PositionStore
+from .storage import TradeDB
 
 
 def build_bot(config: Config, connectors=None) -> ArbitrageBot:
@@ -86,9 +88,11 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
     state_cfg = config.raw.get("state", {}) or {}
     store = (PositionStore(state_cfg.get("positions_file", "data/positions.json"))
              if state_cfg.get("enabled", True) else None)
+    db = (TradeDB(state_cfg.get("db_file", "data/trades.db"))
+          if state_cfg.get("db_enabled", True) else None)
 
     return ArbitrageBot(config, connectors, md, scanner, executor, risk,
-                        trade_logger, notifier=notifier, store=store)
+                        trade_logger, notifier=notifier, store=store, db=db)
 
 
 def _install_ws_noise_filter(log) -> None:
@@ -116,6 +120,16 @@ async def _run(args) -> None:
         level=config.logging.get("level", "INFO"),
     )
     _install_ws_noise_filter(log)
+    # Аналитика по БД: куда уходят деньги.
+    if getattr(args, "analyze", False):
+        state_cfg = config.raw.get("state", {}) or {}
+        db = TradeDB(state_cfg.get("db_file", "data/trades.db"))
+        try:
+            log.info("\n%s", analyze(db.positions()))
+        finally:
+            db.close()
+        return
+
     # История сделок из локального лога.
     if getattr(args, "history", False):
         text = summarize_trades(config.logging.get("trades_log", "logs/trades.jsonl"))
@@ -195,6 +209,8 @@ def main() -> None:
                         help="реально отправлять ордера закрытия даже при dry_run")
     parser.add_argument("--history", action="store_true",
                         help="показать сводку истории сделок из лога и выйти")
+    parser.add_argument("--analyze", action="store_true",
+                        help="анализ сделок из БД: куда уходят деньги, и выйти")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)

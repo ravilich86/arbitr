@@ -154,6 +154,8 @@ class Leg:
     status: LegStatus = LegStatus.PENDING
     fee_paid: float = 0.0               # уплаченная комиссия (USDT)
     error: Optional[str] = None
+    role: str = "entry"                 # entry | exit | equalize | rollback
+    ts: Optional[float] = None          # время выставления (unix c)
 
     @property
     def is_filled(self) -> bool:
@@ -184,6 +186,12 @@ class Position:
     funding_accrued: float = 0.0        # начисленный funding за удержание (USDT)
     equalize_pnl: float = 0.0           # P&L выравнивания ног при входе (USDT)
     realized_pnl: Optional[float] = None  # итоговый P&L (USDT)
+    # Все выставленные ордера позиции (вход/выход/выравнивание/откат) — для аналитики.
+    orders: list = field(default_factory=list)
+    # Котировки в момент решения о закрытии (ожидаемые цены выхода) — для оценки
+    # слиппеджа выхода: факт исполнения против верхушки стакана.
+    exit_quote_ask_high: Optional[float] = None
+    exit_quote_bid_low: Optional[float] = None
 
     @property
     def legs(self) -> tuple[Leg, Leg]:

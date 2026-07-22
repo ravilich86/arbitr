@@ -282,6 +282,11 @@ state:
   # Путь к файлу.
   positions_file: data/positions.json
 
+  # Писать все сделки и ордера в SQLite для анализа (python -m arb.main --analyze).
+  db_enabled: true
+  # Путь к базе.
+  db_file: data/trades.db
+
 # --- Вселенная / защита от коллизий (§4) ---------------------------------
 universe:
   # Пропускать пары, у которых делистинг/поставка в пределах N дней.
