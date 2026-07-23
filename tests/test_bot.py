@@ -126,6 +126,19 @@ async def test_bot_notifies_on_entry(tmp_path):
     assert any("entry BTC/USDT" in m for m in bot.notifier.sent)
 
 
+async def test_history_check_spread_defaults_to_min_gross(tmp_path):
+    # check_spread не задан -> берётся из scanner.min_gross_spread
+    bot = _bot(tmp_path)
+    bot.history_cfg = {"enabled": True, "prefilter": False, "require_divergence": True,
+                       "timeframe": "1d", "days": 10, "max_divergence": 0.003}
+    bot.scanner.min_gross_spread = 0.013
+    # сигнал с raw < 0.013 -> отклонён (порог взят из min_gross_spread)
+    from arb.models import ArbSignal
+    sig = ArbSignal("BTC/USDT", "h", "l", 100.9, 100.0, raw_spread=0.009, net_spread=0.005)
+    ok, reason = await bot._history_check(sig, now=1000)
+    assert ok is False and "не разошлась" in reason
+
+
 async def test_refresh_fees_from_exchange(tmp_path):
     from tests.fixtures import MockFeeClient
     bot = _bot(tmp_path)

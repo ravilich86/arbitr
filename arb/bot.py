@@ -511,7 +511,8 @@ class ArbitrageBot:
         cfg = self.history_cfg
         if not cfg or not cfg.get("enabled", False):
             return True, None
-        check_spread = cfg.get("check_spread", 0.01)
+        # Порог «сейчас разошлось» = порог входа (min_gross_spread), если явно не задан.
+        check_spread = cfg.get("check_spread") or self.scanner.min_gross_spread
         require = cfg.get("require_divergence", True)
         if signal.raw_spread < check_spread:
             # ещё не разошлось до порога
