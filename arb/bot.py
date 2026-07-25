@@ -340,7 +340,8 @@ class ArbitrageBot:
         logger.info("Общий баланс всех бирж: %.2f USDT (%s)", total, pstr)
         if self.notifier:
             msg = self.notifier.close_message(pos, self.config.dry_run)
-            msg += f"\n💵 Общий баланс: {total:.2f} USDT"
+            msg += f"\n💵 Баланс бирж: {pstr}"
+            msg += f"\n💰 Итого: {total:.2f} USDT"
             self._notify_event("close", msg)
 
     async def _harvest_losers(self, now: float) -> None:
@@ -431,7 +432,11 @@ class ArbitrageBot:
             meta_h = cand.contracts.get(sig.exchange_high) if cand else None
             meta_l = cand.contracts.get(sig.exchange_low) if cand else None
             if meta_h and meta_l:
-                _, notional = self.executor.plan_size(sig.ask_low, meta_h, meta_l)
+                amount, notional = self.executor.plan_size(sig.ask_low, meta_h, meta_l)
+                if amount <= 0:  # объём не вписывается в лимит max_notional_per_leg
+                    logger.info("Сигнал %s пропущен: минимум пары превышает лимит объёма",
+                                sig.symbol)
+                    continue
             else:
                 notional = sig.notional
             margin_required = notional / max(self.risk.leverage, 1)

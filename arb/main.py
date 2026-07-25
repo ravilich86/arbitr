@@ -43,6 +43,10 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
 
     # position_size переопределяет notional_target, если задан.
     notional = sz.get("position_size") or sz.get("notional_target", 2000.0)
+    max_leg = sz.get("max_notional_per_leg")
+    # Глубину стакана проверяем по РЕАЛЬНОМУ объёму: в min-режиме — по потолку
+    # max_notional_per_leg (то, что реально можем налить), а не по notional_target.
+    depth_notional = max_leg if (sz.get("mode") == "min" and max_leg) else notional
 
     scanner = Scanner(
         fees=fees,
@@ -51,6 +55,7 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
         max_slippage=sz.get("max_slippage", 0.001),
         min_spread_persistence=sp.get("min_spread_persistence", 0.0),
         notional_target=notional,
+        depth_notional=depth_notional,
         hold_hours=rk.get("max_hold_time", 3600) / 3600.0,
         max_gross_spread=sp.get("max_gross_spread", 0.05),
         max_quote_age_ms=sp.get("max_quote_age_ms"),
@@ -72,6 +77,7 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
         sizing_mode=sz.get("mode", "notional"),
         notional_target=sz.get("notional_target", 2000.0),
         position_size=sz.get("position_size"),
+        max_notional_per_leg=sz.get("max_notional_per_leg"),
     )
 
     risk = RiskManager(

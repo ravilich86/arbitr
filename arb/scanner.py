@@ -240,6 +240,7 @@ class Scanner:
         max_gross_spread: float = 0.05,
         max_quote_age_ms: Optional[float] = None,
         check_top_depth: bool = True,
+        depth_notional: Optional[float] = None,
         filters: Optional[dict] = None,
         persistence: Optional[PersistenceTracker] = None,
     ):
@@ -249,6 +250,10 @@ class Scanner:
         self.max_slippage = max_slippage
         self.min_spread_persistence = min_spread_persistence
         self.notional_target = notional_target
+        # Нотионал для проверки глубины стакана — реальный объём сделки. В режиме
+        # min мы торгуем копейки, поэтому depth считать по notional_target (2000$)
+        # неверно (требует в сотни раз больше, чем реально исполняем).
+        self.depth_notional = depth_notional or notional_target
         self.hold_hours = hold_hours
         self.default_funding_interval_hours = default_funding_interval_hours
         # Переключатели доп-фильтров (базовые критерии — сырой порог и история —
@@ -355,7 +360,7 @@ class Scanner:
             reasons.append(f"slippage>{self.max_slippage}")
         # Фильтр 4: грубая проверка глубины верхушки стакана (вход и выход) (опц.)
         if f["top_depth"] and self.check_top_depth:
-            required_base = self.notional_target / ask_l if ask_l > 0 else 0.0
+            required_base = self.depth_notional / ask_l if ask_l > 0 else 0.0
             if not self._top_depth_ok(required_base, quote_high, quote_low):
                 reasons.append("не хватает глубины стакана (вход/выход)")
         # Фильтр 5: устойчивость расхождения (persistence) (опц.)

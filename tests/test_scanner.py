@@ -189,6 +189,17 @@ def test_evaluate_pair_rejects_thin_book():
     assert any("глубины стакана" in r for r in ev.reasons)
 
 
+def test_depth_uses_depth_notional_not_target():
+    # В min-режиме реальный объём крошечный: depth считаем по depth_notional=10,
+    # а не по notional_target=2000 -> тонкий стакан проходит.
+    s = _scanner(notional_target=2000.0, check_top_depth=True)
+    s.depth_notional = 10.0
+    qh = Quote("h", "X/USDT", 101.0, 101.1, bid_volume=1, ask_volume=1)
+    ql = Quote("l", "X/USDT", 99.9, 100.0, bid_volume=1, ask_volume=1)
+    ev = s.evaluate_pair("X/USDT", "h", "l", qh, ql)
+    assert ev.passed is True  # required_base = 10/100 = 0.1 <= объём 1
+
+
 def test_filters_disable_depth():
     s = _scanner(notional_target=2000.0, check_top_depth=True,
                  filters={"top_depth": False})

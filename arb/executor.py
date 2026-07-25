@@ -277,6 +277,7 @@ class Executor:
         sizing_mode: str = "notional",
         notional_target: float = 2000.0,
         position_size: Optional[float] = None,
+        max_notional_per_leg: Optional[float] = None,
         clock=time.time,
     ):
         self.connectors = connectors
@@ -292,6 +293,9 @@ class Executor:
         self.sizing_mode = sizing_mode
         self.notional_target = notional_target
         self.position_size = position_size
+        # Потолок объёма ОДНОЙ ноги в USDT (правило 7). Если минимум пары выше —
+        # пару не берём (нельзя вписаться в бюджет). None = без потолка.
+        self.max_notional_per_leg = max_notional_per_leg
         # В dry_run исполнять по реальному стакану (слиппедж + частичное исполнение),
         # а не по одной цене верхушки — чтобы P&L был ближе к реальному.
         self.simulate_slippage = simulate_slippage
@@ -497,13 +501,20 @@ class Executor:
 
     def plan_size(self, price: float, meta_high: ContractMeta,
                   meta_low: ContractMeta) -> tuple[float, float]:
-        """Спланировать объём ноги: (base_amount, notional) по режиму sizing_mode."""
+        """Спланировать объём ноги: (base_amount, notional) по режиму sizing_mode.
+
+        Правило 7: если объём превышает max_notional_per_leg — пару НЕ берём
+        (в min-режиме нельзя опуститься ниже минимума биржи), возвращаем (0, 0).
+        """
         if self.sizing_mode == "min":
             amount = compute_min_base(price, meta_high, meta_low)
         else:
             notional = self.position_size or self.notional_target
             amount = compute_base_amount(price, notional, meta_high, meta_low)
-        return amount, amount * price
+        notional = amount * price
+        if self.max_notional_per_leg and notional > self.max_notional_per_leg:
+            return 0.0, 0.0
+        return amount, notional
 
     # ---- вход двумя ногами ----
     async def open_position(self, signal: ArbSignal) -> Position:

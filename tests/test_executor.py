@@ -74,6 +74,21 @@ def test_plan_size_min_mode_small_margin():
     assert notional >= 5.0 and notional < 50.0  # крошечный нотионал (не 2000)
 
 
+def test_plan_size_over_cap_returns_zero():
+    # минимум пары $50 > потолка $10 (правило 7) -> пару не берём
+    m = meta("x", step=0.001, min_amount=0.001, min_notional=50.0)
+    ex = Executor({}, fees={}, dry_run=True, sizing_mode="min", max_notional_per_leg=10)
+    amount, notional = ex.plan_size(price=100.0, meta_high=m, meta_low=m)
+    assert amount == 0.0 and notional == 0.0
+
+
+def test_plan_size_within_cap():
+    m = meta("x", step=0.001, min_amount=0.001, min_notional=5.0)  # $5 <= $10
+    ex = Executor({}, fees={}, dry_run=True, sizing_mode="min", max_notional_per_leg=10)
+    amount, notional = ex.plan_size(price=100.0, meta_high=m, meta_low=m)
+    assert amount > 0 and notional <= 10.0
+
+
 def test_plan_size_notional_mode():
     m = meta("x", step=0.001, min_amount=0.001, min_notional=5.0)
     ex = Executor({}, fees={}, dry_run=True, sizing_mode="notional",
