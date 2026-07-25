@@ -36,8 +36,23 @@ def test_close_message_shows_pnl_and_reason():
 
 def test_startup_message():
     n = _notifier()
-    msg = n.startup_message(["binance", "bybit"], pairs=42, dry_run=True)
+    msg = n.startup_message(["binance", "bybit"], pairs=42, dry_run=True,
+                            balances={"binance": 100.0, "bybit": 55.5})
     assert "42" in msg and "binance" in msg and "Арбитраж-бот" in msg
+    assert n.SEP in msg                    # визуальный разделитель
+    assert "ЗАПУЩЕН" in msg
+    assert "100.00" in msg and "55.50" in msg  # балансы по биржам
+    assert "Итого: 155.50" in msg
+
+
+def test_shutdown_message():
+    n = _notifier()
+    msg = n.shutdown_message(dry_run=False, summary="сделок=3",
+                             balances={"okx": 40.0})
+    assert n.SEP in msg
+    assert "ОСТАНОВЛЕН" in msg
+    assert "сделок=3" in msg
+    assert "40.00" in msg
 
 
 async def test_send_disabled_when_no_token():

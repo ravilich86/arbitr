@@ -58,17 +58,50 @@ class TelegramNotifier:
             logger.warning("Telegram: ошибка отправки: %s", exc)
             return False
 
+    # Визуальный разделитель — чтобы в чате было видно начало нового события.
+    SEP = "━━━━━━━━━━━━━━━━━━━━"
+
     # ---- шаблоны сообщений ----
     def _mode(self, dry_run: bool) -> str:
         return "🧪 DRY-RUN (без реальных ордеров)" if dry_run else "🔴 LIVE (реальные деньги)"
 
-    def startup_message(self, exchanges: list, pairs: int, dry_run: bool) -> str:
+    @staticmethod
+    def _balances_block(balances: Optional[dict]) -> str:
+        """Строки с балансом по каждой бирже."""
+        if not balances:
+            return ""
+        lines = []
+        total = 0.0
+        for name, val in balances.items():
+            if val is None:
+                lines.append(f"   {name}: н/д")
+            else:
+                lines.append(f"   {name}: {val:.2f}")
+                total += val
+        return "\n💵 Балансы:\n" + "\n".join(lines) + f"\n💰 Итого: {total:.2f} USDT"
+
+    def startup_message(self, exchanges: list, pairs: int, dry_run: bool,
+                        balances: Optional[dict] = None) -> str:
         return (
+            f"{self.SEP}\n"
             f"🤖 {self.app_name}\n"
-            f"🚀 Запущен\n"
+            f"🚀 ЗАПУЩЕН\n"
             f"🏦 Биржи: {', '.join(exchanges)}\n"
             f"📚 Пар в работе: {pairs}\n"
             f"{self._mode(dry_run)}"
+            f"{self._balances_block(balances)}\n"
+            f"{self.SEP}"
+        )
+
+    def shutdown_message(self, dry_run: bool, summary: Optional[str] = None,
+                         balances: Optional[dict] = None) -> str:
+        return (
+            f"{self.SEP}\n"
+            f"🤖 {self.app_name}\n"
+            f"🛑 ОСТАНОВЛЕН"
+            + (f"\n📊 {summary}" if summary else "")
+            + f"{self._balances_block(balances)}\n"
+            f"{self.SEP}"
         )
 
     def entry_message(self, sig, dry_run: bool) -> str:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import signal
 
 from .bot import ArbitrageBot
 from .config import Config, load_config
@@ -203,6 +204,23 @@ async def _run(args) -> None:
 
     bot = build_bot(config)
     ws_cfg = config.raw.get("ws", {}) or {}
+
+    # Мягкая остановка по Ctrl+C / SIGTERM: цикл завершается штатно и успевает
+    # отправить сообщение об остановке в Telegram (без грубого KeyboardInterrupt).
+    def _request_stop() -> None:
+        log.info("Остановка по сигналу — завершаю штатно…")
+        bot._stop = True
+        bot._running = False
+
+    loop = asyncio.get_running_loop()
+    for signame in ("SIGINT", "SIGTERM"):
+        sig = getattr(signal, signame, None)
+        if sig is not None:
+            try:
+                loop.add_signal_handler(sig, _request_stop)
+            except NotImplementedError:  # pragma: no cover - Windows
+                pass
+
     try:
         await bot.run(
             iterations=args.iterations, interval=args.interval,

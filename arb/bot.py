@@ -81,6 +81,8 @@ class ArbitrageBot:
         # WS-стриминг
         self._running = False
         self._stream_tasks: list = []
+        # Флаг мягкой остановки (Ctrl+C) — цикл завершается штатно.
+        self._stop = False
         # Пары, уже отторгованные в этой сессии (one_shot_per_pair).
         self._traded_pairs: set = set()
         # Кэш свободного баланса (USDT) по биржам — обновляется в фоне, чтобы вход
@@ -902,15 +904,33 @@ class ArbitrageBot:
         await self.prequalify_universe(
             concurrency=int((self.history_cfg or {}).get("prefilter_concurrency", 20)))
         if self.notifier:
+            # Балансы по каждой бирже на старте.
+            _, parts = await self._total_balance()
             self._notify_event("startup", self.notifier.startup_message(
-                list(self.connectors.keys()), len(self.candidates), self.config.dry_run))
-        if use_ws:
-            await self._run_streaming(iterations, interval, warmup, funding_interval,
-                                      subscribe_delay, symbols_per_stream, method,
-                                      stats_interval)
-        else:
-            await self._run_rest(iterations, interval)
-        logger.info(self.summary.render())
+                list(self.connectors.keys()), len(self.candidates),
+                self.config.dry_run, balances=parts))
+        try:
+            if use_ws:
+                await self._run_streaming(iterations, interval, warmup, funding_interval,
+                                          subscribe_delay, symbols_per_stream, method,
+                                          stats_interval)
+            else:
+                await self._run_rest(iterations, interval)
+        finally:
+            logger.info(self.summary.render())
+            await self.notify_shutdown()
+
+    async def notify_shutdown(self) -> None:
+        """Сообщение об остановке бота (в т.ч. по Ctrl+C). Ждём отправку."""
+        if not self.notifier or not getattr(self.notifier, "enabled", False):
+            return
+        try:
+            _, parts = await self._total_balance()
+            msg = self.notifier.shutdown_message(
+                self.config.dry_run, summary=self.summary.render(), balances=parts)
+            await self.notifier.send(msg)  # ждём отправку — процесс завершается
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Уведомление об остановке не отправлено: %s", exc)
 
     async def _run_streaming(self, iterations, interval, warmup, funding_interval,
                              subscribe_delay, symbols_per_stream, method,
@@ -930,6 +950,9 @@ class ArbitrageBot:
             last_stats = self._clock()
             self.log_diagnostics()  # первая диагностика сразу после прогрева
             while iterations is None or i < iterations:
+                if self._stop:
+                    logger.info("Получен сигнал остановки — завершаю")
+                    break
                 if self.risk.killed and not self.open_positions:
                     logger.info("Kill-switch: открытых позиций нет — стоп")
                     break
@@ -948,6 +971,9 @@ class ArbitrageBot:
         """Цикл на REST: перед каждым проходом обходим биржи запросами (медленно)."""
         i = 0
         while iterations is None or i < iterations:
+            if self._stop:
+                logger.info("Получен сигнал остановки — завершаю")
+                break
             if self.risk.killed and not self.open_positions:
                 logger.info("Kill-switch: открытых позиций нет — стоп")
                 break
