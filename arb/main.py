@@ -208,6 +208,9 @@ async def _run(args) -> None:
 
     bot = build_bot(config)
     ws_cfg = config.raw.get("ws", {}) or {}
+    # Интервал сканирования: приоритет у --interval, иначе execution.scan_interval.
+    scan_interval = (args.interval if args.interval is not None
+                     else float((config.execution or {}).get("scan_interval", 0.2)))
 
     # Мягкая остановка по Ctrl+C / SIGTERM: цикл завершается штатно и успевает
     # отправить сообщение об остановке в Telegram (без грубого KeyboardInterrupt).
@@ -227,7 +230,7 @@ async def _run(args) -> None:
 
     try:
         await bot.run(
-            iterations=args.iterations, interval=args.interval,
+            iterations=args.iterations, interval=scan_interval,
             use_ws=not args.rest,
             warmup=ws_cfg.get("warmup", 5.0),
             funding_interval=ws_cfg.get("funding_interval", 300.0),
@@ -246,7 +249,8 @@ def main() -> None:
     parser.add_argument("--config", default="config.yaml", help="путь к config.yaml")
     parser.add_argument("--iterations", type=int, default=None,
                         help="число итераций цикла (по умолчанию бесконечно)")
-    parser.add_argument("--interval", type=float, default=1.0, help="пауза между итерациями, сек")
+    parser.add_argument("--interval", type=float, default=None,
+                        help="пауза между итерациями, сек (по умолчанию execution.scan_interval)")
     parser.add_argument("--rest", action="store_true", help="использовать REST вместо WS")
     parser.add_argument("--test-telegram", action="store_true",
                         help="отправить тестовое сообщение в Telegram и выйти")

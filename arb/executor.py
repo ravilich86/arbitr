@@ -481,6 +481,33 @@ class Executor:
         )
         self._prepared.add(key)
 
+    async def prewarm(self, targets, concurrency: int = 5) -> int:
+        """Заранее (в фоне) настроить плечо/маржу/режим позиций для пар, которые
+        МОГУТ понадобиться, чтобы первый вход в пару не платил за это ~100-300 мс.
+
+        targets — список (exchange, symbol, meta). Результат кэшируется в
+        self._prepared, повторные вызовы бесплатны. В dry_run — no-op.
+        Возвращает число реально прогретых (exchange, symbol)."""
+        if self.dry_run:
+            return 0
+        sem = asyncio.Semaphore(max(1, concurrency))
+        warmed = 0
+
+        async def one(exchange, symbol, meta):
+            nonlocal warmed
+            if (exchange, symbol) in self._prepared:
+                return
+            async with sem:
+                try:
+                    await self._prepare_leverage(exchange, symbol, meta)
+                    warmed += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("prewarm %s %s: %s", exchange, symbol, exc)
+
+        await asyncio.gather(*[one(e, s, m) for e, s, m in targets],
+                             return_exceptions=True)
+        return warmed
+
     async def _set_margin_mode(self, client, exchange, raw_symbol) -> None:
         if not hasattr(client, "set_margin_mode"):
             return

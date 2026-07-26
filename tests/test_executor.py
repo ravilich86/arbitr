@@ -235,6 +235,29 @@ async def test_prepare_leverage_steps_down():
     assert client.leverage_set is None    # плечо повторно НЕ ставилось
 
 
+async def test_prewarm_leverage_warms_and_caches():
+    from arb.exchanges import ExchangeConnector
+    client = MockLeverageClient(max_leverage_ok=20)
+    conn = ExchangeConnector("binance", client)
+    conn.contracts = {"BTC/USDT": meta("binance")}
+    ex = Executor({"binance": conn}, fees={"binance": 0.0005}, dry_run=False,
+                  leverage=20)
+    warmed = await ex.prewarm([("binance", "BTC/USDT", meta("binance"))])
+    assert warmed == 1
+    assert client.leverage_set == 20
+    assert ("binance", "BTC/USDT") in ex._prepared
+
+    # после прогрева вход в пару больше не ставит плечо (взято из кэша)
+    client.leverage_set = None
+    await ex._prepare_leverage("binance", "BTC/USDT", meta("binance"))
+    assert client.leverage_set is None
+
+
+async def test_prewarm_noop_in_dry_run():
+    ex = Executor({}, fees={}, dry_run=True)
+    assert await ex.prewarm([("binance", "BTC/USDT", meta("binance"))]) == 0
+
+
 async def test_place_leg_converts_base_to_contracts():
     from arb.exchanges import ExchangeConnector
     from arb.models import Side

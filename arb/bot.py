@@ -577,6 +577,21 @@ class ArbitrageBot:
                                  return_exceptions=True)
             await asyncio.sleep(interval)
 
+    async def _prewarm_leverage(self, concurrency: int = 5) -> None:
+        """Фоново прогреть плечо/маржу/режим позиций для всех отобранных пар,
+        чтобы первый вход в пару не тратил на это время в горячем пути."""
+        targets = [(ex, symbol, cand.contracts[ex])
+                   for symbol, cand in self.candidates.items()
+                   for ex in cand.exchanges if ex in cand.contracts]
+        if not targets:
+            return
+        logger.info("Прогрев плеча/маржи: %d пар-бирж в фоне…", len(targets))
+        try:
+            warmed = await self.executor.prewarm(targets, concurrency=concurrency)
+            logger.info("Прогрев плеча/маржи завершён: настроено %d", warmed)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Прогрев плеча прерван: %s", exc)
+
     async def _free_margin(self, *exchanges: str) -> dict[str, float]:
         """Свободная маржа (USDT) по биржам.
 
@@ -943,6 +958,12 @@ class ArbitrageBot:
             bal_interval = float((self.config.risk.get("balance_refresh") or 30.0))
             self._stream_tasks.append(
                 asyncio.create_task(self._balance_loop(bal_interval)))
+            # Прогрев плеча/маржи для отобранных пар в фоне (убирает ~100-300 мс
+            # из первого входа в каждую пару). Не блокирует сканирование.
+            ex_cfg = self.config.execution or {}
+            if ex_cfg.get("prewarm_leverage", True):
+                self._stream_tasks.append(asyncio.create_task(
+                    self._prewarm_leverage(int(ex_cfg.get("prewarm_concurrency", 5)))))
         try:
             if warmup:
                 await asyncio.sleep(warmup)  # дать стримам наполнить кэш
