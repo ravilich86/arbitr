@@ -209,6 +209,31 @@ def test_filters_disable_depth():
     assert ev.passed is True  # глубина не проверяется
 
 
+def test_funding_horizon_does_not_inflate_net():
+    from arb.models import FundingInfo
+    # Большая ставка funding, но короткий горизонт (1ч) -> net НЕ раздувается.
+    s = _scanner(hold_hours=1.0, default_funding_interval_hours=8.0)
+    fh = FundingInfo("h", "X/USDT", 0.03, interval_hours=8)  # 3% за период
+    ev = s.evaluate_pair("X/USDT", "h", "l",
+                         q("h", "X/USDT", 101.5, 101.6),
+                         q("l", "X/USDT", 99.9, 100.0),
+                         funding_high=fh)
+    # funding_income = 0.03 * (1/8) ≈ 0.00375, net в разумных пределах (< 3%)
+    assert ev.signal.net_spread < 0.03
+
+
+def test_funding_horizon_long_inflates_net():
+    from arb.models import FundingInfo
+    # Тот же funding, но горизонт 168ч -> net раздувается (демонстрация бага)
+    s = _scanner(hold_hours=168.0, default_funding_interval_hours=8.0)
+    fh = FundingInfo("h", "X/USDT", 0.03, interval_hours=8)
+    ev = s.evaluate_pair("X/USDT", "h", "l",
+                         q("h", "X/USDT", 101.5, 101.6),
+                         q("l", "X/USDT", 99.9, 100.0),
+                         funding_high=fh)
+    assert ev.signal.net_spread > 0.5  # раздутый net (то, что чиним конфигом)
+
+
 def test_fee_coverage_base_check_always_on():
     # round-trip комиссии = 2*(0.005+0.005) = 2%; сырой спред 1.5% < 2% -> не входим,
     # даже если фильтр net_spread выключен (базовая проверка перекрытия комиссий)

@@ -57,7 +57,10 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
         min_spread_persistence=sp.get("min_spread_persistence", 0.0),
         notional_target=notional,
         depth_notional=depth_notional,
-        hold_hours=rk.get("max_hold_time", 3600) / 3600.0,
+        # Горизонт для ОЦЕНКИ funding в net_spread — реалистичное ожидаемое время
+        # удержания (часы), НЕ аварийный max_hold_time. Иначе прогноз funding
+        # раздувается (напр. 168ч -> net «+68%»).
+        hold_hours=sp.get("funding_horizon_hours", 1.0),
         max_gross_spread=sp.get("max_gross_spread", 0.05),
         max_quote_age_ms=sp.get("max_quote_age_ms"),
         filters=config.raw.get("filters", {}) or {},
