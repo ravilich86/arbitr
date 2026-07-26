@@ -97,6 +97,41 @@ def test_plan_size_notional_mode():
     assert notional == pytest.approx(2000.0, rel=0.01)
 
 
+# ---- выбор способа отправки ордера (WS vs REST) ----
+class _WsClient:
+    """Клиент с поддержкой create_order_ws (binance/bybit/okx/gate)."""
+
+    def __init__(self, ws=True):
+        self.has = {"createOrderWs": ws}
+
+    async def create_order(self, *a, **k):
+        return {"id": "rest"}
+
+    async def create_order_ws(self, *a, **k):
+        return {"id": "ws"}
+
+
+def test_order_sender_prefers_ws_when_supported():
+    ex = Executor({}, fees={}, dry_run=False, use_ws_orders=True)
+    assert ex._order_sender(_WsClient(ws=True)).__name__ == "create_order_ws"
+
+
+def test_order_sender_rest_when_ws_unsupported():
+    # mexc/bitget: createOrderWs=False -> REST
+    ex = Executor({}, fees={}, dry_run=False, use_ws_orders=True)
+    assert ex._order_sender(_WsClient(ws=False)).__name__ == "create_order"
+
+
+def test_order_sender_rest_when_ws_disabled():
+    ex = Executor({}, fees={}, dry_run=False, use_ws_orders=False)
+    assert ex._order_sender(_WsClient(ws=True)).__name__ == "create_order"
+
+
+def test_order_sender_rest_in_dry_run():
+    ex = Executor({}, fees={}, dry_run=True, use_ws_orders=True)
+    assert ex._order_sender(_WsClient(ws=True)).__name__ == "create_order"
+
+
 # ---- парсинг ордера ----
 def test_parse_order_filled():
     p = parse_order({"id": "1", "status": "closed", "filled": 5, "amount": 5,

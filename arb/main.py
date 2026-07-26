@@ -74,6 +74,7 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
         order_type=ex_cfg.get("order_type", "market"),
         on_leg_failure=ex_cfg.get("on_leg_failure", "rollback"),
         leg_timeout=ex_cfg.get("leg_timeout", 5.0),
+        use_ws_orders=ex_cfg.get("use_ws_orders", True),
         leverage=sz.get("leverage", 20),
         margin_mode=sz.get("margin_mode", "isolated"),
         simulate_slippage=ex_cfg.get("simulate_slippage", True),

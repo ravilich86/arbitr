@@ -226,6 +226,9 @@ execution:
   order_type: market        # market | limit
   on_leg_failure: rollback  # если одна нога не встала: rollback | retry
   leg_timeout: 5            # сек ожидания исполнения ноги
+  # Отправлять ордера по WebSocket (быстрее REST на ~50-150 мс) где биржа умеет:
+  # binance, bybit, okx, gate. Для mexc/bitget автоматически REST. false = всегда REST.
+  use_ws_orders: true
   simulate_slippage: true   # в тесте считать исполнение по реальному стакану
   orderbook_limit: 50       # глубина стакана для оценки
 
