@@ -19,7 +19,7 @@ from .config import Config
 from .exchanges import ExchangeConnector, fetch_taker_fee
 from .executor import Executor, current_spread, estimate_open_pnl, should_exit
 from .logger import SessionSummary, TradeLogger
-from .marketdata import MarketData, parse_ticker
+from .marketdata import MarketData, parse_order_book, parse_ticker
 from .models import Candidate, Position, PositionStatus
 from .reconcile import close_positions, fetch_all_positions, pair_positions
 from .risk import RiskManager
@@ -37,6 +37,12 @@ def _rel_diff(x: float, y: float) -> float:
     """Относительная разница двух цен (доля)."""
     ref = (abs(x) + abs(y)) / 2.0
     return abs(x - y) / ref if ref > 0 else 0.0
+
+def _same_quote(a, b) -> bool:
+    """Идентичны ли две котировки по содержанию (цены и объёмы верхушки)."""
+    return (a.bid == b.bid and a.ask == b.ask
+            and a.bid_volume == b.bid_volume and a.ask_volume == b.ask_volume)
+
 
 logger = logging.getLogger("arb.bot")
 
@@ -88,6 +94,9 @@ class ArbitrageBot:
         # Кэш свободного баланса (USDT) по биржам — обновляется в фоне, чтобы вход
         # не ждал fetch_balance.
         self._balances: dict[str, float] = {}
+        # Пауза между разборами снапшота котировок (сек). 0 = на каждое сообщение.
+        self._ingest_interval = float(
+            ((config.raw.get("ws") or {}) if config.raw else {}).get("ingest_interval", 0.05))
 
     # ---- построение вселенной (§3–4) ----
     async def refresh_universe(self) -> None:
@@ -664,16 +673,39 @@ class ArbitrageBot:
         """Разложить пачку BBO/тикеров {raw_symbol -> ticker} в кэш котировок.
 
         Берём только наши кандидатные символы (в all-market стриме приходят все
-        пары биржи — чужие игнорируем)."""
+        пары биржи — чужие игнорируем). Поддерживает два формата:
+          - BBO (watch_bids_asks): {"bids": [[p,a]], "asks": [[p,a]]}
+          - Ticker (watch_tickers):  {"bid": p, "ask": p, ...}
+        """
         if not data:
             return
-        for raw, ticker in data.items():
+        # Единый штамп локального времени на всю пачку — свежесть считаем по нему,
+        # а не по timestamp биржи (другой хронометр, рассинхрон часов ломает фильтр).
+        received_at = self._clock() * 1000.0
+        for raw, item in data.items():
             symbol = raw_map.get(raw)
             if symbol is None:
                 continue
-            quote = parse_ticker(exchange, symbol, ticker or {})
-            if quote is not None:
-                self.md.quotes[(exchange, symbol)] = quote
+            item = item or {}
+            # Объёмы приходят в контрактах — пересчитываем в базовый актив.
+            cs = self.md.contract_size(exchange, symbol)
+            if item.get("bid") is not None and item.get("ask") is not None:
+                quote = parse_ticker(exchange, symbol, item, contract_size=cs,
+                                     received_at=received_at)
+            elif item.get("bids") and item.get("asks"):
+                quote = parse_order_book(exchange, symbol, item, contract_size=cs,
+                                         received_at=received_at)
+            else:
+                continue
+            if quote is None:
+                continue
+            # newUpdates=False отдаёт полный снапшот, включая давно не менявшиеся
+            # пары. Штамп времени обновляем ТОЛЬКО если котировка реально изменилась,
+            # иначе мёртвая пара выглядела бы вечно свежей и фильтр возраста не работал.
+            prev = self.md.quotes.get((exchange, symbol))
+            if prev is not None and _same_quote(prev, quote):
+                quote.received_at = prev.received_at
+            self.md.quotes[(exchange, symbol)] = quote
 
     @staticmethod
     def _is_unsupported(exc: Exception) -> bool:
@@ -725,7 +757,10 @@ class ArbitrageBot:
                 self._ingest_bbo(exchange, raw_map, data)
                 backoff = 1.0
                 fails = 0
-                await asyncio.sleep(0)
+                # Пауза между разборами снапшота: ccxt продолжает наполнять свой
+                # кэш в фоне, поэтому данные не теряются, а мы не перемалываем весь
+                # рынок на каждое сообщение (это и было причиной отставания).
+                await asyncio.sleep(self._ingest_interval)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -864,7 +899,6 @@ class ArbitrageBot:
         насколько текущие спреды далеки от порога.
         """
         now = now if now is not None else self._clock()
-        max_age = (self.scanner.max_quote_age_ms or 10000)
         fresh_pairs = 0
         spreads: list = []
         for symbol, cand in self.candidates.items():
@@ -873,7 +907,8 @@ class ArbitrageBot:
                 q = self.md.get_quote(ex, symbol)
                 if q is None:
                     continue
-                if q.timestamp is not None and now * 1000 - q.timestamp > max_age:
+                # Ровно тот же критерий свежести, что и на входе (без дубля логики).
+                if self.scanner._quote_stale(q, now):
                     continue
                 quotes[ex] = q
             if len(quotes) < 2:

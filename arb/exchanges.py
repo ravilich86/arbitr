@@ -220,6 +220,14 @@ def build_ccxt_client(cfg: ExchangeConfig, testnet: bool = False) -> Any:
         client.timeout = 30000
     except Exception:  # pragma: no cover
         pass
+    # newUpdates=False: watch_* отдаёт ПОЛНЫЙ текущий снапшот кэша ccxt, а не
+    # дельту одного сообщения. Для сканера нужно актуальное состояние рынка;
+    # при дефолтном True мы разбирали all-market поток по одному сообщению,
+    # отставали от него и котировки выглядели просроченными (покрытие 0/669).
+    try:
+        client.newUpdates = False
+    except Exception:  # pragma: no cover
+        pass
     if testnet:
         try:
             client.set_sandbox_mode(True)

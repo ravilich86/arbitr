@@ -25,7 +25,22 @@ _INTERVAL_RE = re.compile(r"(\d+(?:\.\d+)?)\s*h", re.IGNORECASE)
 # --------------------------------------------------------------------------
 #  Парсеры
 # --------------------------------------------------------------------------
-def parse_ticker(exchange: str, symbol: str, ticker: dict) -> Optional[Quote]:
+def _to_base(vol: Optional[float], contract_size: Optional[float]) -> Optional[float]:
+    """Объём из КОНТРАКТОВ в базовый актив: base = contracts * contractSize.
+
+    Биржи (okx, gate, bitget…) отдают объёмы стакана в контрактах, а фильтр
+    глубины сравнивает их с требуемым объёмом в базовом активе. Без пересчёта
+    глубина занижается в contractSize раз и пара ложно отклоняется.
+    """
+    if vol is None:
+        return None
+    cs = contract_size if contract_size and contract_size > 0 else 1.0
+    return vol * cs
+
+
+def parse_ticker(exchange: str, symbol: str, ticker: dict,
+                 contract_size: Optional[float] = None,
+                 received_at: Optional[float] = None) -> Optional[Quote]:
     """ccxt ticker -> Quote. None, если нет bid/ask."""
     bid = ticker.get("bid")
     ask = ticker.get("ask")
@@ -36,13 +51,16 @@ def parse_ticker(exchange: str, symbol: str, ticker: dict) -> Optional[Quote]:
         symbol=symbol,
         bid=float(bid),
         ask=float(ask),
-        bid_volume=_opt_float(ticker.get("bidVolume")),
-        ask_volume=_opt_float(ticker.get("askVolume")),
+        bid_volume=_to_base(_opt_float(ticker.get("bidVolume")), contract_size),
+        ask_volume=_to_base(_opt_float(ticker.get("askVolume")), contract_size),
         timestamp=_opt_float(ticker.get("timestamp")),
+        received_at=received_at if received_at is not None else time.time() * 1000.0,
     )
 
 
-def parse_order_book(exchange: str, symbol: str, ob: dict) -> Optional[Quote]:
+def parse_order_book(exchange: str, symbol: str, ob: dict,
+                     contract_size: Optional[float] = None,
+                     received_at: Optional[float] = None) -> Optional[Quote]:
     """ccxt order book -> Quote (лучший bid/ask + их объёмы)."""
     bids = ob.get("bids") or []
     asks = ob.get("asks") or []
@@ -55,9 +73,12 @@ def parse_order_book(exchange: str, symbol: str, ob: dict) -> Optional[Quote]:
         symbol=symbol,
         bid=float(best_bid[0]),
         ask=float(best_ask[0]),
-        bid_volume=_opt_float(best_bid[1]) if len(best_bid) > 1 else None,
-        ask_volume=_opt_float(best_ask[1]) if len(best_ask) > 1 else None,
+        bid_volume=_to_base(_opt_float(best_bid[1]) if len(best_bid) > 1 else None,
+                            contract_size),
+        ask_volume=_to_base(_opt_float(best_ask[1]) if len(best_ask) > 1 else None,
+                            contract_size),
         timestamp=_opt_float(ob.get("timestamp")),
+        received_at=received_at if received_at is not None else time.time() * 1000.0,
     )
 
 
@@ -130,13 +151,14 @@ class MarketData:
         client = self.connectors[exchange].client
         raw_symbol = self._raw_symbol(exchange, symbol)
         quote: Optional[Quote] = None
+        cs = self.contract_size(exchange, symbol)
 
         if use_ws and hasattr(client, "watch_order_book"):
             ob = await client.watch_order_book(raw_symbol)
-            quote = parse_order_book(exchange, symbol, ob)
+            quote = parse_order_book(exchange, symbol, ob, contract_size=cs)
         elif hasattr(client, "fetch_ticker"):
             ticker = await client.fetch_ticker(raw_symbol)
-            quote = parse_ticker(exchange, symbol, ticker)
+            quote = parse_ticker(exchange, symbol, ticker, contract_size=cs)
 
         if quote is not None:
             self.quotes[(exchange, symbol)] = quote
@@ -144,6 +166,12 @@ class MarketData:
 
     def get_quote(self, exchange: str, symbol: str) -> Optional[Quote]:
         return self.quotes.get((exchange, symbol))
+
+    def contract_size(self, exchange: str, symbol: str) -> Optional[float]:
+        """contractSize пары на бирже (для пересчёта объёмов в базовый актив)."""
+        conn = self.connectors.get(exchange)
+        meta = conn.contracts.get(symbol) if conn is not None else None
+        return getattr(meta, "contract_size", None) if meta is not None else None
 
     # ---- funding ----
     async def update_funding(self, exchange: str, symbol: str) -> Optional[FundingInfo]:

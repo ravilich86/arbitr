@@ -34,6 +34,34 @@ def test_parse_order_book_empty():
     assert parse_order_book("bybit", "ETH/USDT", {"bids": [], "asks": []}) is None
 
 
+# ---- объёмы приходят в КОНТРАКТАХ -> переводим в базовый актив ----
+def test_parse_ticker_converts_volume_by_contract_size():
+    t = {"bid": 1.0, "ask": 1.01, "bidVolume": 300, "askVolume": 200}
+    q = parse_ticker("gate", "X/USDT", t, contract_size=10.0)
+    assert q.bid_volume == 3000.0   # 300 контрактов * 10
+    assert q.ask_volume == 2000.0
+
+
+def test_parse_order_book_converts_volume_by_contract_size():
+    ob = {"bids": [[1.0, 300]], "asks": [[1.01, 200]]}
+    q = parse_order_book("okx", "X/USDT", ob, contract_size=0.01)
+    assert q.bid_volume == 3.0      # 300 контрактов * 0.01
+    assert q.ask_volume == 2.0
+
+
+def test_contract_size_none_means_one_to_one():
+    t = {"bid": 1.0, "ask": 1.01, "bidVolume": 5, "askVolume": 7}
+    q = parse_ticker("binance", "X/USDT", t, contract_size=None)
+    assert q.bid_volume == 5 and q.ask_volume == 7
+
+
+def test_parse_sets_local_received_at():
+    q = parse_ticker("binance", "X/USDT", {"bid": 1.0, "ask": 1.1, "timestamp": 111})
+    assert q.timestamp == 111          # время биржи сохранено
+    assert q.received_at is not None   # и есть локальный штамп приёма
+    assert q.received_at > 1e12        # unix ms
+
+
 def test_parse_interval_from_string():
     assert parse_interval_hours({"interval": "8h"}) == 8.0
     assert parse_interval_hours({"interval": "4h"}) == 4.0

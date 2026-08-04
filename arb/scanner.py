@@ -274,11 +274,18 @@ class Scanner:
         self.persistence = persistence or PersistenceTracker()
 
     def _quote_stale(self, quote: Quote, now: Optional[float]) -> bool:
-        """Устарела ли котировка. now — wall-clock секунды; timestamp котировки — мс."""
-        if self.max_quote_age_ms is None or now is None or quote.timestamp is None:
+        """Устарела ли котировка. now — wall-clock секунды; метки котировки — мс.
+
+        Возраст считаем по received_at (локальное время приёма) — это тот же
+        хронометр, что и now. timestamp биржи используем только как фолбэк:
+        рассинхрон часов биржи и VPS иначе ошибочно «старит» котировки.
+        """
+        if self.max_quote_age_ms is None or now is None:
             return False
-        age_ms = now * 1000.0 - quote.timestamp
-        return age_ms > self.max_quote_age_ms
+        stamp = quote.received_at if quote.received_at is not None else quote.timestamp
+        if stamp is None:
+            return False
+        return (now * 1000.0 - stamp) > self.max_quote_age_ms
 
     def _top_depth_ok(self, required_base: float, quote_high: Quote, quote_low: Quote) -> bool:
         """Пролезает ли required_base по верхушке стакана на вход И на выход (§6).

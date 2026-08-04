@@ -74,9 +74,16 @@ class Quote:
     symbol: str
     bid: float
     ask: float
+    # Объёмы на лучшем уровне В БАЗОВОМ АКТИВЕ. Биржи отдают их в КОНТРАКТАХ,
+    # поэтому при разборе умножаем на contractSize (иначе на okx/gate глубина
+    # занижается в contractSize раз и фильтр ложно отклоняет пару).
     bid_volume: Optional[float] = None
     ask_volume: Optional[float] = None
-    timestamp: Optional[float] = None  # unix ms
+    timestamp: Optional[float] = None  # unix ms — время сервера БИРЖИ
+    # Локальное время приёма (unix ms). Для проверки свежести используем именно
+    # его: timestamp биржи живёт в другом хронометре, и рассинхрон часов VPS
+    # ошибочно засчитывается как «возраст» котировки.
+    received_at: Optional[float] = None
 
 
 @dataclass

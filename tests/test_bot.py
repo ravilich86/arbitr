@@ -69,6 +69,42 @@ def _bot(tmp_path: Path) -> ArbitrageBot:
     return bot
 
 
+def test_ingest_keeps_received_at_when_quote_unchanged(tmp_path):
+    """newUpdates=False отдаёт полный снапшот на каждой итерации. Штамп времени
+    должен обновляться только при РЕАЛЬНОМ изменении котировки, иначе мёртвая
+    пара выглядела бы вечно свежей и фильтр возраста перестал бы работать."""
+    bot = _bot(tmp_path)
+    ticks = iter([1000.0, 1005.0, 1010.0])   # секунды
+    bot._clock = lambda: next(ticks)
+    raw_map = {"BTC/USDT:USDT": "BTC/USDT"}
+
+    bot._ingest_bbo("h", raw_map, {"BTC/USDT:USDT": {"bid": 100.0, "ask": 100.1}})
+    first = bot.md.get_quote("h", "BTC/USDT").received_at
+    assert first == 1000.0 * 1000
+
+    # тот же снапшот -> штамп НЕ двигается (котировка не менялась)
+    bot._ingest_bbo("h", raw_map, {"BTC/USDT:USDT": {"bid": 100.0, "ask": 100.1}})
+    assert bot.md.get_quote("h", "BTC/USDT").received_at == first
+
+    # цена изменилась -> штамп обновился
+    bot._ingest_bbo("h", raw_map, {"BTC/USDT:USDT": {"bid": 100.2, "ask": 100.3}})
+    assert bot.md.get_quote("h", "BTC/USDT").received_at == 1010.0 * 1000
+
+
+def test_ingest_converts_volume_by_contract_size(tmp_path):
+    """Объёмы из стрима приходят в контрактах — кэш хранит их в базовом активе."""
+    bot = _bot(tmp_path)
+    bot.connectors["h"].contracts["BTC/USDT"] = ContractMeta(
+        "h", "BTC/USDT", "BTC/USDT:USDT", "BTC", "USDT",
+        step_size=1.0, min_amount=1.0, min_notional=5.0, max_leverage=20,
+        contract_size=10.0)
+    bot._ingest_bbo("h", {"BTC/USDT:USDT": "BTC/USDT"},
+                    {"BTC/USDT:USDT": {"bid": 1.0, "ask": 1.01,
+                                       "bidVolume": 300, "askVolume": 200}})
+    q = bot.md.get_quote("h", "BTC/USDT")
+    assert q.bid_volume == 3000.0 and q.ask_volume == 2000.0
+
+
 class _RecordingNotifier:
     """Мок нотифаера: пишет отправленные сообщения, не ходит в сеть."""
 

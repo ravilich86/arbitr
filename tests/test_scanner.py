@@ -179,6 +179,37 @@ def test_evaluate_pair_rejects_stale_quote():
     assert any("устаревшая" in r for r in ev.reasons)
 
 
+def test_stale_uses_local_received_at_not_exchange_clock():
+    """Возраст считаем по локальному received_at. Рассинхрон часов биржи
+    (timestamp «отстал» на час) не должен помечать котировку устаревшей."""
+    s = _scanner(max_quote_age_ms=2000)
+    skewed = 100000 - 3600 * 1000          # часы биржи отстают на час
+    qh = Quote("h", "BTC/USDT", 101.0, 101.1, timestamp=skewed, received_at=99500)
+    ql = Quote("l", "BTC/USDT", 99.9, 100.0, timestamp=skewed, received_at=99500)
+    ev = s.evaluate_pair("BTC/USDT", "h", "l", qh, ql, now=100.0)
+    assert not any("устаревшая" in r for r in ev.reasons)
+
+
+def test_stale_by_received_at():
+    """А вот реально не менявшаяся котировка (received_at старый) — устаревшая."""
+    s = _scanner(max_quote_age_ms=2000)
+    qh = Quote("h", "BTC/USDT", 101.0, 101.1, received_at=90000)  # возраст 10с
+    ql = Quote("l", "BTC/USDT", 99.9, 100.0, received_at=99900)
+    ev = s.evaluate_pair("BTC/USDT", "h", "l", qh, ql, now=100.0)
+    assert any("устаревшая" in r for r in ev.reasons)
+
+
+def test_depth_ok_when_volume_normalized_by_contract_size():
+    """Регресс: пара по $0.01, нужно $10 (=1000 базы). На gate в стакане
+    300 контрактов * contractSize 10 = 3000 базы — глубины ХВАТАЕТ.
+    До фикса объём сравнивался в контрактах (300 < 1000) и пара отклонялась."""
+    s = _scanner(check_top_depth=True)
+    s.depth_notional = 10.0
+    qh = Quote("binance", "X/USDT", 0.0102, 0.0103, bid_volume=5000, ask_volume=5000)
+    ql = Quote("gate", "X/USDT", 0.0099, 0.0100, bid_volume=3000, ask_volume=3000)
+    assert s._top_depth_ok(10.0 / ql.ask, qh, ql) is True
+
+
 def test_evaluate_pair_rejects_thin_book():
     # объёма верхушки стакана не хватает под нужный нотионал
     s = _scanner(notional_target=2000.0, check_top_depth=True)
