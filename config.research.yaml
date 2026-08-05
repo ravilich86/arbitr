@@ -1,0 +1,183 @@
+# ============================================================================
+#  ИССЛЕДОВАТЕЛЬСКИЙ ПРОГОН (paper trading) — НЕ БОЕВОЙ КОНФИГ
+#
+#  ЗАЧЕМ: собрать статистику, на которой видно, живёт ли стратегия вообще.
+#  В бою за 9 дней было 4-5 сделок — по ним нельзя отличить неудачу от
+#  системного минуса. Здесь за сутки должно набраться несколько сотен.
+#
+#  ЧЕМ ОТЛИЧАЕТСЯ ОТ БОЕВОГО config.yaml:
+#    dry_run: true              — ордера НЕ отправляются, всё считается на бумаге
+#    one_shot_per_pair: false   — пара может отработать много раз (нужна выборка)
+#    max_concurrent_positions: 0— без лимита, иначе теряем сигналы
+#    cooldown: 0                — не пропускать повторные расхождения
+#    telegram.enabled: false    — иначе сотни пуш-уведомлений
+#    свои файлы БД и логов      — боевая статистика не смешивается
+#
+#  ПОРОГИ ВХОДА НАМЕРЕННО ТЕ ЖЕ, ЧТО В БОЮ. Мы измеряем текущую стратегию,
+#  а не подгоняем её. Крутить параметры — только после того, как увидим цифры.
+#
+#  КАК ЗАПУСКАТЬ И РАЗБИРАТЬ — см. RESEARCH.md
+# ============================================================================
+
+# --- Режим -----------------------------------------------------------------
+dry_run: true      # ГЛАВНОЕ: реальные деньги не участвуют
+testnet: false     # данные берём с РЕАЛЬНОГО рынка (иначе замер бессмысленен)
+
+# --- Вход и выход: КАК В БОЮ, не трогаем --------------------------------------
+spread:
+  min_gross_spread: 0.013     # 99-й перцентиль по замерам — оставляем как есть
+  max_gross_spread: 0.05
+  take_profit_pct: null       # ждём схождения, не срезаем прибыль раньше
+  stop_loss_pct: null         # риск ловим по спреду (max_adverse_spread)
+  exit_spread: 0.0
+  min_net_spread: 0.002
+  funding_horizon_hours: 1.0
+  min_spread_persistence: 1
+  max_quote_age_ms: 2000
+
+# --- Проверка «пара исторически ходила вместе»: как в бою ---------------------
+history:
+  enabled: true
+  prefilter: true
+  require_divergence: true
+  days: 10
+  timeframe: 1d
+  max_divergence: 0.003
+  prefilter_concurrency: 20
+  max_candidates_check: 10
+
+# --- Риск: ослаблен ТОЛЬКО чтобы не терять наблюдения ------------------------
+risk:
+  # 0 = без лимита. В бою лимит защищает депозит, здесь он бы резал выборку.
+  max_concurrent_positions: 0
+
+  max_adverse_spread: 0.02    # как в бою
+  max_hold_time: 3600         # 1 час: не держать бумажную позицию неделю
+
+  # Щедрый бюджет — в dry_run это лишь условный лимит для риск-чека.
+  max_position_per_exchange: 100000
+
+  cooldown: 0                 # повторные расхождения по паре нужны для статистики
+  one_shot_per_pair: false    # КЛЮЧЕВОЕ отличие: пара отрабатывает многократно
+
+  profit_buffer_close: false  # не искажать P&L неттингом — мерим чистый результат
+  profit_buffer_keep: 0.0
+  close_orphans_on_start: false  # в dry_run позиций на биржах нет
+  liquidation_buffer: 0.03
+  balance_refresh: 60
+
+# --- Размер позиции: как в бою ----------------------------------------------
+sizing:
+  mode: min
+  notional_target: 2000
+  max_notional_per_leg: 10
+  leverage: 20
+  margin_mode: cross
+  max_slippage: 0.001
+
+# --- Фильтры: все включены, как в бою ---------------------------------------
+filters:
+  net_spread: true
+  top_depth: true
+  persistence: true
+  max_gross_spread: true
+  quote_age: true
+
+# --- Биржи ------------------------------------------------------------------
+exchanges:
+  binance:
+    enabled: true
+    api_key_env: BINANCE_API_KEY
+    api_secret_env: BINANCE_API_SECRET
+    taker_fee: 0.0005
+    default_type: swap
+  bybit:
+    enabled: true
+    api_key_env: BYBIT_API_KEY
+    api_secret_env: BYBIT_API_SECRET
+    taker_fee: 0.00055
+    default_type: swap
+  okx:
+    enabled: true
+    api_key_env: OKX_API_KEY
+    api_secret_env: OKX_API_SECRET
+    api_password_env: OKX_API_PASSWORD
+    taker_fee: 0.0005
+    default_type: swap
+  mexc:
+    enabled: true
+    api_key_env: MEXC_API_KEY
+    api_secret_env: MEXC_API_SECRET
+    taker_fee: 0.0004
+    default_type: swap
+  bitget:
+    enabled: true
+    api_key_env: BITGET_API_KEY
+    api_secret_env: BITGET_API_SECRET
+    api_password_env: BITGET_API_PASSWORD
+    taker_fee: 0.0006
+    default_type: swap
+  gate:
+    enabled: true
+    api_key_env: GATE_API_KEY
+    api_secret_env: GATE_API_SECRET
+    taker_fee: 0.0005
+    default_type: swap
+
+fees:
+  fetch_from_exchange: true   # реальные комиссии — иначе P&L будет неверным
+
+# --- Telegram: ВЫКЛЮЧЕН -----------------------------------------------------
+# При сотнях бумажных сделок это сотни уведомлений.
+telegram:
+  enabled: false
+  token_env: TELEGRAM_BOT_TOKEN
+  chat_id_env: TELEGRAM_CHAT_ID
+  app_name: "Арбитраж-бот (ИССЛЕДОВАНИЕ)"
+  live_only_trades: true
+
+# ============================================================================
+#  ПРОДВИНУТОЕ
+# ============================================================================
+
+execution:
+  order_type: market          # мерим ТЕКУЩУЮ стратегию (маркет-ордера)
+  on_leg_failure: rollback
+  leg_timeout: 5
+  scan_interval: 0.2
+  use_ws_orders: true
+  prewarm_leverage: false     # в dry_run плечо не выставляется — незачем греть
+  prewarm_concurrency: 5
+  # КРИТИЧНО для замера: исполнение считается по РЕАЛЬНОМУ стакану, а не по
+  # идеальной цене сигнала. Без этого paper-P&L был бы фантазией.
+  simulate_slippage: true
+  orderbook_limit: 50
+
+ws:
+  method: auto
+  ingest_interval: 0.05
+  symbols_per_stream: 100
+  subscribe_delay: 0.3
+  warmup: 8
+  funding_interval: 300
+  stats_interval: 60          # реже: за сутки лог не должен раздуться
+
+universe:
+  skip_delisting_days: 3
+  max_contract_size_ratio: null
+
+allow_list: []
+deny_list:
+  - ""
+
+# --- Отдельные файлы: боевую статистику не трогаем --------------------------
+state:
+  enabled: true
+  positions_file: data/research_positions.json
+  db_enabled: true                       # ОБЯЗАТЕЛЬНО: источник для --analyze
+  db_file: data/research_trades.db
+
+logging:
+  app_log: logs/research_app.log
+  trades_log: logs/research_trades.jsonl
+  level: INFO

@@ -128,6 +128,28 @@ class _RecordingNotifier:
         return f"close {pos.symbol} pnl={pos.realized_pnl}"
 
 
+async def test_dry_run_close_skips_balance_fetch(tmp_path):
+    """В dry_run балансы не меняются, а запрос стоит 6 REST-вызовов на каждое
+    закрытие. На исследовательском прогоне (сотни сделок) это лишний трафик."""
+    from arb.models import Leg, Position, Side
+    bot = _bot(tmp_path)
+    calls = []
+    async def _boom():
+        calls.append(1)
+        raise AssertionError("в dry_run балансы дёргать не должны")
+    bot._total_balance = _boom
+    bot.notifier = _RecordingNotifier()
+    pos = Position("t1", "BTC/USDT", "h", "l",
+                   Leg("h", "BTC/USDT", Side.SHORT, 1.0),
+                   Leg("l", "BTC/USDT", Side.LONG, 1.0))
+    qh = Quote("h", "BTC/USDT", 100.0, 100.1)
+    ql = Quote("l", "BTC/USDT", 99.9, 100.0)
+    await bot._close_position(pos, qh, ql, "target", now=1.0, hold=10.0)
+    await asyncio.sleep(0)  # уведомление уходит фоновой задачей
+    assert calls == []                                  # запроса балансов не было
+    assert any("close" in m for m in bot.notifier.sent)  # но уведомление ушло
+
+
 async def test_refresh_universe_tolerates_failing_exchange(tmp_path):
     from tests.fixtures import (
         FailingClient,

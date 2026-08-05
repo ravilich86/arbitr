@@ -345,6 +345,12 @@ class ArbitrageBot:
             self.db.record_position(pos, leverage=self.risk.leverage,
                                     dry_run=self.config.dry_run)
         # Пункт 10: общий баланс всех бирж после закрытия любой позиции.
+        # В dry_run балансы не меняются (ордеров нет), а запрос стоит 6 REST-вызовов
+        # на каждое закрытие — на исследовательском прогоне это сотни лишних запросов.
+        if self.config.dry_run:
+            if self.notifier:
+                self._notify_event("close", self.notifier.close_message(pos, True))
+            return
         total, parts = await self._total_balance()
         pstr = ", ".join(
             f"{n}={v:.2f}" if v is not None else f"{n}=?" for n, v in parts.items())
