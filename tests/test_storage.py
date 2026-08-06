@@ -2,7 +2,13 @@
 
 import pytest
 
-from arb.analytics import analyze, entry_slippage, exit_slippage
+from arb.analytics import (
+    analyze,
+    entry_slippage,
+    entry_spread_actual,
+    exit_slippage,
+    exit_spread_actual,
+)
 from arb.models import ArbSignal, Leg, LegStatus, Position, PositionStatus, Side
 from arb.storage import TradeDB
 
@@ -68,6 +74,62 @@ def test_entry_and_exit_slippage():
     assert entry_slippage(row) > 0
     # выход: откупили дороже (99.6 vs 99.5) и продали дешевле (99.4 vs 99.5)
     assert exit_slippage(row) > 0
+
+
+def _exact_position(short_close: float, ex_high="bitget"):
+    """Сделка с ТОЧНОЙ арифметикой: P&L выведен из цен, а не задан руками.
+
+    Вход: шорт 101, лонг 100 (захвачено 1%). База = notional/цена = 0.1.
+    """
+    base = 0.1
+    gross = (101.0 - short_close) * base          # шорт: прибыль при падении
+    fees = 0.011 + 0.011
+    return {
+        "symbol": "ACE/USDT", "exchange_high": ex_high, "exchange_low": "gate",
+        "entry_raw_spread": 0.0168,
+        "signal_bid_high": 102.0, "signal_ask_low": 99.5,
+        "short_entry_price": 101.0, "long_entry_price": 100.0,
+        "short_close_price": short_close, "long_close_price": 100.0,
+        "exit_quote_ask_high": short_close, "exit_quote_bid_low": 100.0,
+        "notional": 10.0, "entry_fees": 0.011, "close_fees": 0.011,
+        "funding_accrued": 0.0, "realized_pnl": gross - fees,
+        "close_reason": "max_adverse", "hold_seconds": 700,
+    }
+
+
+def test_exit_spread_actual_detects_divergence():
+    """Спред разошёлся дальше (101->102.5 при лонге на 100) -> отдали 2.5%."""
+    assert exit_spread_actual(_exact_position(102.5)) == pytest.approx(0.025)
+    # сошёлся полностью -> отдали 0
+    assert exit_spread_actual(_exact_position(100.0)) == pytest.approx(0.0)
+
+
+def test_entry_spread_actual():
+    # реально захвачено: (101-100)/100 = 1%
+    assert entry_spread_actual(_exact_position(100.0)) == pytest.approx(0.01)
+
+
+def test_decomposition_balances():
+    """Разложение должно сходиться с фактическим P&L (расхождение ~0).
+
+    Регресс: раньше строки «отдано на выходе» не было, и по компонентам
+    выходил ПЛЮС там, где фактически был минус.
+    """
+    rows = [_exact_position(102.5), _exact_position(100.2)]
+    text = analyze(rows)
+    line = [l for l in text.splitlines() if "расхождение модели" in l][0]
+    val = float(line.split(":")[1].strip().rstrip("%)").replace("+", ""))
+    assert abs(val) < 0.01          # сходится с точностью до сотых процента
+    assert "отдано на выходе" in text
+
+
+def test_analyze_flags_poisoning_exchange():
+    """Одна биржа даёт почти весь убыток -> отчёт должен на неё указать."""
+    rows = [_exact_position(102.5, "bitget") for _ in range(6)]
+    rows += [_exact_position(100.5, "bybit") for _ in range(3)]
+    text = analyze(rows)
+    assert "БЕЗ bitget" in text
+    assert "bitget даёт" in text
 
 
 def test_analyze_report(tmp_path):

@@ -46,6 +46,31 @@ def exit_slippage(pos: dict) -> Optional[float]:
     return short_slip + long_slip
 
 
+def entry_spread_actual(pos: dict) -> Optional[float]:
+    """Спред, РЕАЛЬНО захваченный на входе (по фактическим ценам исполнения).
+
+    Отличается от сигнального сырого спреда на величину слиппеджа входа.
+    """
+    se, le = pos.get("short_entry_price"), pos.get("long_entry_price")
+    if not (se and le):
+        return None
+    return (se - le) / le
+
+
+def exit_spread_actual(pos: dict) -> Optional[float]:
+    """Спред, ОТДАННЫЙ на выходе (по фактическим ценам закрытия).
+
+    Шорт откупаем на H, лонг продаём на L. Если расхождение сошлось — цены
+    сравнялись и спред ≈ 0, мы забираем захваченное на входе. Если разошлось
+    дальше (max_adverse) — здесь будет крупная положительная величина, и именно
+    она съедает результат. Без этой строки разложение не сходится с P&L.
+    """
+    sc, lc = pos.get("short_close_price"), pos.get("long_close_price")
+    if not (sc and lc):
+        return None
+    return (sc - lc) / lc
+
+
 def _avg(values: list) -> Optional[float]:
     vals = [v for v in values if v is not None]
     return (sum(vals) / len(vals)) if vals else None
@@ -135,10 +160,8 @@ def analyze(positions: list[dict]) -> str:
 
     raw = _avg([p.get("entry_raw_spread") for p in closed])
     ent_slip = _avg([entry_slippage(p) for p in closed])
-    ex_slip = _avg([exit_slippage(p) for p in closed])
-    lines.append(f"  Сырой спред при входе:      {_fmt_pct(raw)}")
-    lines.append(f"  − слиппедж входа:           {_fmt_pct(ent_slip)}")
-    lines.append(f"  − слиппедж выхода:          {_fmt_pct(ex_slip)}")
+    ent_act = _avg([entry_spread_actual(p) for p in closed])
+    ex_act = _avg([exit_spread_actual(p) for p in closed])
 
     # комиссии/funding в долях нотионала
     fee_fracs, fund_fracs, pnl_fracs = [], [], []
@@ -150,9 +173,29 @@ def analyze(positions: list[dict]) -> str:
         fee_fracs.append(fees / notional)
         fund_fracs.append(float(p.get("funding_accrued") or 0) / notional)
         pnl_fracs.append(float(p["realized_pnl"]) / notional)
-    lines.append(f"  − комиссии (round-trip):    {_fmt_pct(_avg(fee_fracs))}")
-    lines.append(f"  + funding:                  {_fmt_pct(_avg(fund_fracs))}")
-    lines.append(f"  = фактический P&L:          {_fmt_pct(_avg(pnl_fracs))}")
+    fee = _avg(fee_fracs)
+    fund = _avg(fund_fracs)
+    pnl_pct = _avg(pnl_fracs)
+
+    lines.append(f"  Сырой спред при входе:      {_fmt_pct(raw)}")
+    lines.append(f"  − слиппедж входа:           {_fmt_pct(ent_slip)}")
+    lines.append(f"  = захвачено на входе:       {_fmt_pct(ent_act)}")
+    # Ключевая строка: если расхождение не сошлось (а разошлось дальше),
+    # здесь будет крупная величина — она и съедает результат.
+    lines.append(f"  − отдано на выходе:         {_fmt_pct(ex_act)}")
+    lines.append(f"  − комиссии (round-trip):    {_fmt_pct(fee)}")
+    lines.append(f"  + funding:                  {_fmt_pct(fund)}")
+    lines.append(f"  = фактический P&L:          {_fmt_pct(pnl_pct)}")
+
+    # Контроль сходимости: если остаток не близок к нулю, часть издержек не
+    # учтена и выводам по разложению верить нельзя.
+    if None not in (ent_act, ex_act, fee, fund, pnl_pct):
+        residual = pnl_pct - (ent_act - ex_act - fee + fund)
+        lines.append(f"  (расхождение модели:        {_fmt_pct(residual)})")
+
+    ex_slip = _avg([exit_slippage(p) for p in closed])
+    if ex_slip is not None:
+        lines.append(f"  справочно, слиппедж выхода: {_fmt_pct(ex_slip)}")
 
     # по причинам закрытия
     by_reason: dict[str, list] = {}
@@ -185,6 +228,41 @@ def analyze(positions: list[dict]) -> str:
     for route, vals in sorted(by_route.items(), key=lambda x: sum(x[1])):
         lines.append(f"  {route}: {len(vals)} шт, P&L={sum(vals):+.4f}")
 
+    # По БИРЖАМ (а не связкам): показывает, не отравляет ли статистику одна
+    # площадка. Сделка учитывается обеим ногам, поэтому сумма больше общего P&L.
+    by_ex: dict[str, list] = {}
+    excluded_ex, excluded_rest = None, None
+    for p in closed:
+        for ex in (p.get("exchange_high"), p.get("exchange_low")):
+            if ex:
+                by_ex.setdefault(ex, []).append(float(p["realized_pnl"]))
+    if by_ex:
+        lines.append("")
+        lines.append("--- По биржам (участие в сделке) ---")
+        for ex, vals in sorted(by_ex.items(), key=lambda x: sum(x[1])):
+            share = sum(vals) / total * 100 if total else 0.0
+            lines.append(f"  {ex}: {len(vals)} шт, P&L={sum(vals):+.4f}, "
+                         f"средний={sum(vals) / len(vals):+.4f} ({share:.0f}% от общего)")
+        # Какую биржу выгоднее всего исключить? Ранжируем не по сумме (её набирает
+        # та, что просто участвует чаще), а по тому, насколько исключение улучшает
+        # СРЕДНИЙ результат остальных сделок.
+        avg_all = total / n
+        best_gain, best_ex, best_rest = 0.0, None, None
+        for ex in by_ex:
+            rest = [float(p["realized_pnl"]) for p in closed
+                    if ex not in (p.get("exchange_high"), p.get("exchange_low"))]
+            if not rest or len(rest) == n:
+                continue
+            gain = (sum(rest) / len(rest)) - avg_all
+            if gain > best_gain:
+                best_gain, best_ex, best_rest = gain, ex, rest
+        if best_ex:
+            lines.append(
+                f"  БЕЗ {best_ex}: {len(best_rest)} шт, P&L={sum(best_rest):+.4f}, "
+                f"средний={sum(best_rest) / len(best_rest):+.4f} "
+                f"(было {avg_all:+.4f} — исключение улучшает результат)")
+            excluded_ex, excluded_rest = best_ex, best_rest
+
     # время удержания
     holds = [float(p["hold_seconds"]) for p in closed if p.get("hold_seconds")]
     if holds:
@@ -196,6 +274,12 @@ def analyze(positions: list[dict]) -> str:
     lines.append("")
     lines.append("--- Вывод ---")
     parts = []
+    # Главное подозрение: расхождение не сошлось, а разошлось дальше. Это самая
+    # частая причина минуса, и раньше её в выводе не было вовсе.
+    if ent_act and ex_act is not None and ex_act > ent_act * 0.5:
+        parts.append("спред НЕ СОШЁЛСЯ: на выходе отдали "
+                     f"{_fmt_pct(ex_act)} из захваченных {_fmt_pct(ent_act)} — "
+                     "расхождения продолжают расти, а не возвращаться")
     if ent_slip and raw and ent_slip > raw * 0.3:
         parts.append("слиппедж ВХОДА съедает значительную часть спреда")
     if ex_slip and raw and ex_slip > raw * 0.3:
@@ -203,6 +287,13 @@ def analyze(positions: list[dict]) -> str:
     avg_fee = _avg(fee_fracs)
     if avg_fee and raw and avg_fee > raw * 0.3:
         parts.append("комиссии съедают значительную часть спреда")
+    # Одна биржа тянет вниз весь результат?
+    if excluded_ex and total < 0:
+        share = (total - sum(excluded_rest)) / total * 100
+        parts.append(
+            f"биржа {excluded_ex} даёт {share:.0f}% убытка — без неё средний "
+            f"{sum(excluded_rest) / len(excluded_rest):+.4f} против {total / n:+.4f}; "
+            "проверь качество её котировок (обрывы WS) или исключи её")
     if not parts:
         parts.append("издержки умеренные — вероятно, спред расходился против нас "
                      "(смотри причины закрытия: stop_loss/max_adverse)")
