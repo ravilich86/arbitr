@@ -125,11 +125,43 @@ def test_decomposition_balances():
 
 def test_analyze_flags_poisoning_exchange():
     """Одна биржа даёт почти весь убыток -> отчёт должен на неё указать."""
-    rows = [_exact_position(102.5, "bitget") for _ in range(6)]
-    rows += [_exact_position(100.5, "bybit") for _ in range(3)]
+    rows = [_exact_position(102.5, "bitget") for _ in range(20)]
+    rows += [_exact_position(100.5, "bybit") for _ in range(20)]
     text = analyze(rows)
     assert "БЕЗ bitget" in text
     assert "bitget даёт" in text
+
+
+def test_analyze_reports_outliers():
+    """Единичные катастрофические сделки выносятся отдельно и группируются по паре."""
+    rows = [_exact_position(101.2) for _ in range(50)]      # мелкий фон
+    big = _exact_position(140.0)                            # обвал: -3.9 за сделку
+    big["symbol"] = "JCT/USDT"
+    rows.append(big)
+    text = analyze(rows)
+    assert "Выбросы" in text
+    assert "JCT/USDT: 1 шт" in text
+    assert "БЕЗ выбросов" in text
+    assert "нетождествен" in text or "не тождественны" in text
+
+
+def test_analyze_does_not_blame_most_frequent_exchange():
+    """Регресс: биржа, которая просто участвует чаще всех, не должна обвиняться.
+
+    На реальных данных отчёт предлагал исключить binance — биржу с лучшей
+    ликвидностью, — хотя убыток сидел в нескольких парах-выбросах.
+    """
+    rows = []
+    for _ in range(60):                        # binance везде, убыток ровный
+        rows.append(_exact_position(101.05, "bybit"))
+    for _ in range(60):
+        rows.append(_exact_position(101.05, "okx"))
+    big = _exact_position(150.0, "gate")       # выброс тянет статистику
+    big["symbol"] = "JCT/USDT"
+    rows.append(big)
+    text = analyze(rows)
+    assert "БЕЗ gate" not in text              # выброс не повод обвинять биржу
+    assert "Выбросы" in text
 
 
 def test_analyze_report(tmp_path):

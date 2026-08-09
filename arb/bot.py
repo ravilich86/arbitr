@@ -309,6 +309,7 @@ class ArbitrageBot:
                 take_profit_pct=self.config.spread.get("take_profit_pct"),
                 stop_loss_pct=self.config.spread.get("stop_loss_pct"),
                 entry_pnl_pct=pos.entry_pnl_pct,
+                max_loss_pct=self.config.risk.get("max_loss_pct"),
             )
             # Риск-контроль ликвидации (§9). При КРОСС-марже неприменим: ликвидация
             # считается по счёту целиком, а не по отдельной позиции — иначе даёт

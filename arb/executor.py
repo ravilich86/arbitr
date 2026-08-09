@@ -787,10 +787,12 @@ def should_exit(
     take_profit_pct: Optional[float] = None,
     stop_loss_pct: Optional[float] = None,
     entry_pnl_pct: Optional[float] = None,
+    max_loss_pct: Optional[float] = None,
 ) -> tuple[bool, Optional[str]]:
     """Решить, пора ли закрывать позицию, и по какой причине (§7).
 
     Логика фиксации прибыли/убытка по нереализованному P&L (доля нотионала):
+      - catastrophic: аварийный предохранитель по убытку (см. ниже);
       - take_profit_pct: прибыль достигла цели -> фиксируем прибыль;
       - target: спред сошёлся, НО закрываем только если не в убытке (иначе держим,
         чтобы комиссии/слиппедж не превратили выход в минус);
@@ -798,6 +800,16 @@ def should_exit(
       - max_adverse: спред разошёлся сверх лимита -> контролируемое закрытие;
       - max_hold_time: предельное время удержания.
     """
+    # Аварийный предохранитель. max_adverse ловит РАСХОЖДЕНИЕ СПРЕДА, но если пара
+    # на самом деле не тождественна (или случилось реальное событие), цены уезжают
+    # рывком и позиция теряет кратно больше лимита по спреду. В замерах 11 таких
+    # сделок из 1515 дали 28% всего убытка (JCT: -5.2% за сделку при лимите 2%).
+    # Считаем ОТ ТОЧКИ ВХОДА: позиция сразу после открытия уже в минусе на величину
+    # издержек, абсолютный порог давал бы мгновенный стоп-аут.
+    if max_loss_pct is not None and est_pnl_pct is not None:
+        baseline = entry_pnl_pct if entry_pnl_pct is not None else 0.0
+        if est_pnl_pct <= baseline - max_loss_pct:
+            return True, "catastrophic"
     if take_profit_pct is not None and est_pnl_pct is not None and est_pnl_pct >= take_profit_pct:
         return True, "take_profit"
     if cur_spread <= exit_spread and (est_pnl_pct is None or est_pnl_pct >= 0):

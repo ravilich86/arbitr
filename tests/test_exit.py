@@ -40,6 +40,44 @@ def test_should_exit_max_hold():
     assert ok and reason == "max_hold_time"
 
 
+def test_catastrophic_loss_guard_fires():
+    """Пара оказалась не тождественной: цены уехали рывком. Предохранитель должен
+    сработать, даже если спред формально ещё в пределах max_adverse."""
+    ok, reason = should_exit(
+        cur_spread=0.015, hold_time=10, exit_spread=0.0,
+        max_hold_time=3600, max_adverse_spread=0.02,
+        est_pnl_pct=-0.055, entry_pnl_pct=-0.005, max_loss_pct=0.03)
+    assert ok and reason == "catastrophic"
+
+
+def test_catastrophic_guard_counts_from_entry_not_zero():
+    """Позиция сразу после входа уже в минусе на издержки — это НЕ повод закрывать.
+    Просадка считается от entry_pnl_pct, иначе был бы мгновенный стоп-аут."""
+    ok, reason = should_exit(
+        cur_spread=0.015, hold_time=1, exit_spread=0.0,
+        max_hold_time=3600, max_adverse_spread=0.02,
+        est_pnl_pct=-0.005, entry_pnl_pct=-0.005, max_loss_pct=0.03)
+    assert not ok
+
+
+def test_catastrophic_guard_disabled_by_default():
+    """max_loss_pct=None -> предохранитель выключен, поведение как раньше."""
+    ok, reason = should_exit(
+        cur_spread=0.015, hold_time=10, exit_spread=0.0,
+        max_hold_time=3600, max_adverse_spread=0.02,
+        est_pnl_pct=-0.50, entry_pnl_pct=-0.005, max_loss_pct=None)
+    assert not ok
+
+
+def test_catastrophic_guard_beats_max_adverse():
+    """При обвале важнее закрыться по убытку, а не ждать порога по спреду."""
+    ok, reason = should_exit(
+        cur_spread=0.05, hold_time=10, exit_spread=0.0,
+        max_hold_time=3600, max_adverse_spread=0.02,
+        est_pnl_pct=-0.10, entry_pnl_pct=0.0, max_loss_pct=0.03)
+    assert ok and reason == "catastrophic"
+
+
 def test_should_exit_take_profit():
     ok, reason = should_exit(cur_spread=0.005, hold_time=10, exit_spread=0.0,
                              max_hold_time=3600, max_adverse_spread=0.02,

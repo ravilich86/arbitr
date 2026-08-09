@@ -230,6 +230,38 @@ def analyze(positions: list[dict]) -> str:
 
     # По БИРЖАМ (а не связкам): показывает, не отравляет ли статистику одна
     # площадка. Сделка учитывается обеим ногам, поэтому сумма больше общего P&L.
+    # ВЫБРОСЫ: единичные сделки с катастрофическим убытком. Обычно это признак,
+    # что пара на деле не тождественна (или случилось реальное событие) — цены
+    # уезжают рывком далеко за лимит по спреду. Такие сделки перекашивают всю
+    # статистику, поэтому показываем их отдельно и исключаем из выводов.
+    avg_abs = sum(abs(x) for x in pnls) / n
+    outliers = [p for p in closed
+                if float(p["realized_pnl"]) < -5 * avg_abs] if avg_abs > 0 else []
+    if outliers:
+        out_sum = sum(float(p["realized_pnl"]) for p in outliers)
+        lines.append("")
+        lines.append("--- Выбросы (катастрофические сделки) ---")
+        # Группируем по паре: одна и та же пара обычно даёт серию выбросов.
+        by_out: dict[str, list] = {}
+        for p in outliers:
+            by_out.setdefault(p.get("symbol") or "?", []).append(p)
+        for sym, ps in sorted(by_out.items(),
+                              key=lambda x: sum(float(p["realized_pnl"]) for p in x[1]))[:10]:
+            s = sum(float(p["realized_pnl"]) for p in ps)
+            notional = float(ps[0].get("notional") or 0)
+            pct = f", {s / len(ps) / notional * 100:+.1f}% нотионала за сделку" \
+                if notional else ""
+            routes = {f"{p.get('exchange_high')}→{p.get('exchange_low')}" for p in ps}
+            lines.append(f"  {sym}: {len(ps)} шт, {s:+.4f}{pct} "
+                         f"({', '.join(sorted(routes))})")
+        lines.append(f"  ИТОГО {len(outliers)} шт из {n} = {out_sum:+.4f} "
+                     f"({out_sum / total * 100:.0f}% всего убытка)" if total else "")
+        rest_pnls = [x for p, x in zip(closed, pnls) if p not in outliers]
+        if rest_pnls:
+            lines.append(f"  БЕЗ выбросов: {len(rest_pnls)} шт, "
+                         f"P&L={sum(rest_pnls):+.4f}, "
+                         f"средний={sum(rest_pnls) / len(rest_pnls):+.4f}")
+
     by_ex: dict[str, list] = {}
     excluded_ex, excluded_rest = None, None
     for p in closed:
@@ -246,21 +278,29 @@ def analyze(positions: list[dict]) -> str:
         # Какую биржу выгоднее всего исключить? Ранжируем не по сумме (её набирает
         # та, что просто участвует чаще), а по тому, насколько исключение улучшает
         # СРЕДНИЙ результат остальных сделок.
-        avg_all = total / n
+        #
+        # ВАЖНО: считаем это БЕЗ выбросов. Иначе биржа, которая просто участвует
+        # чаще других, набирает наибольшую сумму убытка и ошибочно обвиняется.
+        # Реальный случай: убыток сидел в нескольких парах, а отчёт предлагал
+        # исключить binance — биржу с лучшей ликвидностью и стабильным потоком.
+        base = [p for p in closed if p not in outliers] or closed
+        avg_base = sum(float(p["realized_pnl"]) for p in base) / len(base)
         best_gain, best_ex, best_rest = 0.0, None, None
         for ex in by_ex:
-            rest = [float(p["realized_pnl"]) for p in closed
+            rest = [float(p["realized_pnl"]) for p in base
                     if ex not in (p.get("exchange_high"), p.get("exchange_low"))]
-            if not rest or len(rest) == n:
+            # Нужен осмысленный остаток: если биржа есть почти везде, судить не о чем.
+            if len(rest) < max(10, len(base) * 0.2):
                 continue
-            gain = (sum(rest) / len(rest)) - avg_all
+            gain = (sum(rest) / len(rest)) - avg_base
             if gain > best_gain:
                 best_gain, best_ex, best_rest = gain, ex, rest
-        if best_ex:
+        # Обвиняем биржу, только если без неё убыток падает хотя бы вдвое.
+        if best_ex and avg_base < 0 and best_gain > abs(avg_base) * 0.5:
             lines.append(
-                f"  БЕЗ {best_ex}: {len(best_rest)} шт, P&L={sum(best_rest):+.4f}, "
-                f"средний={sum(best_rest) / len(best_rest):+.4f} "
-                f"(было {avg_all:+.4f} — исключение улучшает результат)")
+                f"  БЕЗ {best_ex} (и без выбросов): {len(best_rest)} шт, "
+                f"P&L={sum(best_rest):+.4f}, средний={sum(best_rest) / len(best_rest):+.4f} "
+                f"(было {avg_base:+.4f})")
             excluded_ex, excluded_rest = best_ex, best_rest
 
     # время удержания
@@ -277,9 +317,12 @@ def analyze(positions: list[dict]) -> str:
     # Главное подозрение: расхождение не сошлось, а разошлось дальше. Это самая
     # частая причина минуса, и раньше её в выводе не было вовсе.
     if ent_act and ex_act is not None and ex_act > ent_act * 0.5:
-        parts.append("спред НЕ СОШЁЛСЯ: на выходе отдали "
-                     f"{_fmt_pct(ex_act)} из захваченных {_fmt_pct(ent_act)} — "
-                     "расхождения продолжают расти, а не возвращаться")
+        back = ex_act / ent_act * 100
+        tail = ("расхождение РАСТЁТ, а не возвращается" if ex_act > ent_act
+                else "расхождение УСТОЙЧИВОЕ — оно не схлопывается, "
+                     "и весь результат съедают издержки")
+        parts.append(f"спред НЕ СОШЁЛСЯ: вернули {back:.0f}% захваченного "
+                     f"({_fmt_pct(ex_act)} из {_fmt_pct(ent_act)}) — {tail}")
     if ent_slip and raw and ent_slip > raw * 0.3:
         parts.append("слиппедж ВХОДА съедает значительную часть спреда")
     if ex_slip and raw and ex_slip > raw * 0.3:
@@ -287,6 +330,11 @@ def analyze(positions: list[dict]) -> str:
     avg_fee = _avg(fee_fracs)
     if avg_fee and raw and avg_fee > raw * 0.3:
         parts.append("комиссии съедают значительную часть спреда")
+    if outliers and total < 0:
+        out_sum = sum(float(p["realized_pnl"]) for p in outliers)
+        parts.append(
+            f"{len(outliers)} сделок-выбросов из {n} дают {out_sum / total * 100:.0f}% "
+            "убытка — вероятно, пары не тождественны; поможет risk.max_loss_pct")
     # Одна биржа тянет вниз весь результат?
     if excluded_ex and total < 0:
         share = (total - sum(excluded_rest)) / total * 100
