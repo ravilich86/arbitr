@@ -53,6 +53,31 @@ def test_can_open_concurrent_limit():
     assert d.allowed is False and "одновременных" in d.reason
 
 
+def _pos_sym(symbol, notional=10.0):
+    s = Leg("h", symbol, Side.SHORT, 1, filled_amount=1, avg_price=notional)
+    l = Leg("l", symbol, Side.LONG, 1, filled_amount=1, avg_price=notional)
+    return Position(f"id-{symbol}", symbol, "h", "l", s, l, status=PositionStatus.OPEN)
+
+
+def test_max_positions_per_pair_blocks_concentration():
+    """Одна пара не должна занимать все слоты: в замере это превращает выборку
+    в одну ставку, повторённую много раз, а в бою — в концентрацию риска."""
+    rm = RiskManager(max_concurrent_positions=50, max_positions_per_pair=2,
+                     max_position_per_exchange=10000, cooldown=0)
+    held = [_pos_sym("KAITO/USDT"), _pos_sym("KAITO/USDT")]
+    d = rm.can_open("KAITO/USDT", held, 1, {"h": 1000, "l": 1000}, ("h", "l"))
+    assert d.allowed is False and "по паре" in d.reason
+    # другая пара при этом заходит свободно
+    assert rm.can_open("ETH/USDT", held, 1, {"h": 1000, "l": 1000}, ("h", "l")).allowed
+
+
+def test_max_positions_per_pair_zero_means_unlimited():
+    rm = RiskManager(max_concurrent_positions=50, max_positions_per_pair=0,
+                     max_position_per_exchange=10000, cooldown=0)
+    held = [_pos_sym("KAITO/USDT") for _ in range(20)]
+    assert rm.can_open("KAITO/USDT", held, 1, {"h": 1000, "l": 1000}, ("h", "l")).allowed
+
+
 def test_can_open_exposure_limit():
     rm = RiskManager(max_concurrent_positions=5, max_position_per_exchange=100)
     existing = _pos(notional=80.0)  # 80 USDT экспозиции на h и l

@@ -63,6 +63,7 @@ class RiskManager:
     """Состояние и правила риск-контроля (§9)."""
 
     max_concurrent_positions: int = 1
+    max_positions_per_pair: int = 0            # 0 = без лимита на одну пару
     max_position_per_exchange: float = 100.0   # USDT залога на бирже
     liquidation_buffer: float = 0.03
     cooldown: float = 300.0
@@ -122,6 +123,15 @@ class RiskManager:
         # max_concurrent_positions == 0 -> без лимита (берём по максимуму).
         if self.max_concurrent_positions and len(active) >= self.max_concurrent_positions:
             return RiskDecision(False, "достигнут лимит одновременных позиций")
+
+        # Лимит позиций по ОДНОЙ паре. Без него один символ занимает все слоты:
+        # в прогоне №3 одна пара дала 95% сделок, и «699 наблюдений» оказались
+        # одной ставкой, повторённой 665 раз. Это и риск концентрации в бою, и
+        # потеря информации в замере. 0 = без лимита.
+        if self.max_positions_per_pair:
+            same = sum(1 for p in active if p.symbol == symbol)
+            if same >= self.max_positions_per_pair:
+                return RiskDecision(False, f"достигнут лимит позиций по паре {symbol}")
 
         if self.in_cooldown(symbol, now):
             return RiskDecision(False, "пара в cooldown")

@@ -87,6 +87,7 @@ def build_bot(config: Config, connectors=None) -> ArbitrageBot:
 
     risk = RiskManager(
         max_concurrent_positions=rk.get("max_concurrent_positions", 1),
+        max_positions_per_pair=rk.get("max_positions_per_pair", 0),
         max_position_per_exchange=rk.get("max_position_per_exchange", 100.0),
         liquidation_buffer=rk.get("liquidation_buffer", 0.03),
         cooldown=rk.get("cooldown", 300.0),
