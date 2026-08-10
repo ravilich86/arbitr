@@ -303,6 +303,26 @@ def analyze(positions: list[dict]) -> str:
                 f"(было {avg_base:+.4f})")
             excluded_ex, excluded_rest = best_ex, best_rest
 
+    # КОНЦЕНТРАЦИЯ. Критично при ПРИБЫЛЬНОМ результате: если почти весь плюс дала
+    # одна связка или одна пара, то это не N независимых наблюдений, а одна ставка,
+    # повторённая N раз. Статистическая уверенность тогда кратно ниже, чем кажется.
+    top_route_share = top_pair_share = 0.0
+    if total:
+        tr_n, tr_name = max(((len(v), k) for k, v in by_route.items()), default=(0, ""))
+        tp_n, tp_name = max(((len(v), k) for k, v in by_pair.items()), default=(0, ""))
+        top_route_share, top_pair_share = tr_n / n, tp_n / n
+        lines.append("")
+        lines.append("--- Концентрация ---")
+        lines.append(f"  крупнейшая связка: {tr_name} — {tr_n}/{n} сделок "
+                     f"({top_route_share * 100:.0f}%), P&L={sum(by_route[tr_name]):+.4f}")
+        lines.append(f"  крупнейшая пара:   {tp_name} — {tp_n}/{n} сделок "
+                     f"({top_pair_share * 100:.0f}%), P&L={sum(by_pair[tp_name]):+.4f}")
+        rest_r = [x for k, v in by_route.items() if k != tr_name for x in v]
+        if rest_r:
+            lines.append(f"  БЕЗ крупнейшей связки: {len(rest_r)} шт, "
+                         f"P&L={sum(rest_r):+.4f}, "
+                         f"средний={sum(rest_r) / len(rest_r):+.4f}")
+
     # время удержания
     holds = [float(p["hold_seconds"]) for p in closed if p.get("hold_seconds")]
     if holds:
@@ -314,6 +334,30 @@ def analyze(positions: list[dict]) -> str:
     lines.append("")
     lines.append("--- Вывод ---")
     parts = []
+    # ПРИБЫЛЬНЫЙ результат разбираем отдельно: тут опасность не в убытке, а в том,
+    # чтобы принять концентрированную/переоценённую выборку за рабочую стратегию.
+    if total > 0:
+        if top_route_share > 0.7:
+            parts.append(
+                f"ОСТОРОЖНО: {top_route_share * 100:.0f}% сделок — одна связка бирж. "
+                "Это не независимая выборка, а одна ставка, повторённая много раз; "
+                "уверенность НИЖЕ, чем кажется по числу сделок")
+        if top_pair_share > 0.5:
+            parts.append(f"{top_pair_share * 100:.0f}% сделок — одна пара, "
+                         "результат зависит от её поведения")
+        # Доля закрытий ПО ТАЙМАУТУ: если позиции массово упираются в лимит времени,
+        # значит схождение ещё не завершилось и настоящий горизонт длиннее.
+        timeouts = len(by_reason.get("max_hold_time", []))
+        if timeouts > n * 0.4:
+            parts.append(f"{timeouts / n * 100:.0f}% сделок закрыты по таймауту, "
+                         "а не по схождению — реальный горизонт может быть ДЛИННЕЕ "
+                         "текущего max_hold_time")
+        if not parts:
+            parts.append("результат положительный и распределён по связкам")
+        parts.append("прогон бумажный: funding оценочный, лимит одновременных "
+                     "позиций снят — в бою проверь маржу и капитал")
+        lines.append("  " + "; ".join(parts))
+        return "\n".join(lines)
     # Главное подозрение: расхождение не сошлось, а разошлось дальше. Это самая
     # частая причина минуса, и раньше её в выводе не было вовсе.
     if ent_act and ex_act is not None and ex_act > ent_act * 0.5:

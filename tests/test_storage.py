@@ -178,3 +178,33 @@ def test_analyze_report(tmp_path):
 
 def test_analyze_empty():
     assert "нет" in analyze([])
+
+
+def test_profitable_run_warns_about_concentration():
+    """Прибыльный прогон, где 95% сделок — одна связка: отчёт обязан предупредить,
+    что это не независимая выборка, а одна ставка, повторённая много раз."""
+    rows = [_exact_position(100.0) for _ in range(95)]        # прибыльные, gate/bitget
+    for r in rows:
+        r["realized_pnl"] = 0.05
+    tail = [_exact_position(100.0, "bybit") for _ in range(5)]
+    for r in tail:
+        r["realized_pnl"] = -0.01
+    text = analyze(rows + tail)
+    assert "Концентрация" in text
+    assert "ОСТОРОЖНО" in text
+    assert "одна связка" in text
+    assert "бумажный" in text          # напоминание про dry_run
+
+
+def test_profitable_run_without_concentration_is_calm():
+    """Прибыль распределена по связкам -> паниковать не о чем."""
+    rows = []
+    for ex in ("bybit", "okx", "binance", "mexc"):
+        for i in range(25):
+            r = _exact_position(100.0, ex)
+            r["realized_pnl"] = 0.05
+            r["symbol"] = f"S{i}/USDT"      # разные пары, а не одна
+            rows.append(r)
+    text = analyze(rows)
+    assert "ОСТОРОЖНО" not in text
+    assert "распределён по связкам" in text
