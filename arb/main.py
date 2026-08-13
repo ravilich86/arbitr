@@ -152,6 +152,32 @@ async def _run(args) -> None:
                 await conn.close()
         return
 
+    # Анализ funding-арбитража по ИСТОРИЧЕСКИМ ставкам (сделок не совершает).
+    if getattr(args, "funding_report", False):
+        from .funding import build_report, collect
+        connectors = create_connectors(config)
+        try:
+            await asyncio.gather(*[c.load_perp_contracts() for c in connectors.values()],
+                                 return_exceptions=True)
+            # Пары, доступные минимум на двух биржах.
+            counts: dict = {}
+            for conn in connectors.values():
+                for s in getattr(conn, "contracts", {}):
+                    counts[s] = counts.get(s, 0) + 1
+            symbols = sorted(s for s, c in counts.items() if c >= 2)
+            allow = config.raw.get("allow_list") or []
+            if allow:
+                symbols = [s for s in symbols if s in allow]
+            log.info("Funding-анализ: %d пар, история за %d дней…",
+                     len(symbols), args.funding_days)
+            data = await collect(connectors, symbols, days=args.funding_days)
+            fees = {name: ex.taker_fee for name, ex in config.exchanges.items()}
+            log.info("\n%s", build_report(data, fees))
+        finally:
+            for conn in connectors.values():
+                await conn.close()
+        return
+
     # Аналитика по БД: куда уходят деньги.
     if getattr(args, "analyze", False):
         state_cfg = config.raw.get("state", {}) or {}
@@ -267,6 +293,10 @@ def main() -> None:
                         help="анализ сделок из БД: куда уходят деньги, и выйти")
     parser.add_argument("--sync-fills", action="store_true",
                         help="сверить записи с фактической историей бирж и выйти")
+    parser.add_argument("--funding-report", action="store_true",
+                        help="анализ funding-арбитража по истории ставок (без сделок)")
+    parser.add_argument("--funding-days", type=int, default=30,
+                        help="глубина истории ставок для --funding-report, дней")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
