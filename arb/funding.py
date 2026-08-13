@@ -39,6 +39,16 @@ HOURS_PER_DAY = 24.0
 DAYS_PER_YEAR = 365.0
 
 
+def _short_money(v: Optional[float]) -> str:
+    """Оборот в компактном виде: 1.2M, 340K."""
+    if v is None:
+        return "—"
+    for div, suf in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if v >= div:
+            return f"{v / div:.1f}{suf}"
+    return f"{v:.0f}"
+
+
 def hourly_rate(funding_rate: float, interval_hours: Optional[float]) -> float:
     """Ставка за период -> ставка за ЧАС.
 
@@ -134,25 +144,27 @@ def pair_opportunity(
     hourly_high: float,
     hourly_low: float,
     round_trip_fee: float,
+    slippage: float = 0.0,
 ) -> dict:
-    """Экономика одной связки: доход в час и окупаемость комиссий.
+    """Экономика одной связки: доход в час и окупаемость ВСЕХ издержек.
 
     hourly_high — часовая ставка на бирже, где мы ШОРТИМ (получаем);
     hourly_low  — часовая ставка на бирже, где мы ЛОНГУЕМ (платим).
+
+    slippage — проскальзывание входа и выхода суммарно (доля цены). Учитывать
+    ОБЯЗАТЕЛЬНО: на тонких парах оно кратно превышает комиссии (замер: 1.56%
+    против 0.28%), и без него окупаемость занижается в разы. Именно эта ошибка
+    делала первую версию отчёта чрезмерно оптимистичной.
     """
     income_per_hour = hourly_high - hourly_low
+    cost = round_trip_fee + slippage
+    base = {"income_per_hour": income_per_hour, "cost": cost,
+            "daily_pct": income_per_hour * HOURS_PER_DAY * 100,
+            "apr_pct": income_per_hour * HOURS_PER_DAY * DAYS_PER_YEAR * 100}
     if income_per_hour <= 0:
-        return {"income_per_hour": income_per_hour, "hours_to_breakeven": None,
-                "daily_pct": income_per_hour * HOURS_PER_DAY * 100,
-                "apr_pct": income_per_hour * HOURS_PER_DAY * DAYS_PER_YEAR * 100}
-    return {
-        "income_per_hour": income_per_hour,
-        # Через сколько часов удержания накопленный funding покроет комиссии
-        # входа и выхода. Это и есть минимальный разумный горизонт сделки.
-        "hours_to_breakeven": round_trip_fee / income_per_hour,
-        "daily_pct": income_per_hour * HOURS_PER_DAY * 100,
-        "apr_pct": income_per_hour * HOURS_PER_DAY * DAYS_PER_YEAR * 100,
-    }
+        return {**base, "hours_to_breakeven": None}
+    # Через сколько часов удержания накопленный funding покроет вход и выход.
+    return {**base, "hours_to_breakeven": cost / income_per_hour}
 
 
 def build_report(
@@ -160,13 +172,24 @@ def build_report(
     fees: dict,
     min_stability: float = 0.7,
     top: int = 25,
+    slippage: float = 0.0,
+    volumes: Optional[dict] = None,
+    min_volume: float = 0.0,
 ) -> str:
     """Отчёт по возможностям funding-арбитража.
 
     data: {symbol: {exchange: [(ts_ms, rate), ...]}}
     fees: {exchange: taker_fee}
+    volumes: {symbol: {exchange: суточный оборот в USDT}} — для отсева неликвида.
+
+    ЗАЧЕМ ФИЛЬТР ЛИКВИДНОСТИ. Весь смысл funding-арбитража в том, чтобы работать
+    на парах, где цены бирж совпадают и нет риска расхождения. На тонких монетах
+    этого нет: там цена может разъехаться на несколько процентов и одним движением
+    съесть недели накопленного funding. Без фильтра отчёт выносит наверх ровно тот
+    неликвид, на котором мы уже потеряли деньги в ценовом арбитраже.
     """
     rows = []
+    skipped_illiquid = 0
     for symbol, per_ex in data.items():
         stats = {}
         for ex, series in per_ex.items():
@@ -183,8 +206,14 @@ def build_report(
                 hourly_l, iv_l, n_l, ser_l = stats[l]
                 if hourly_h <= hourly_l:
                     continue  # доход только когда ставка шорт-ноги выше
+                # Ликвидность нужна на ОБЕИХ ногах — узкое место определяет риск.
+                if min_volume and volumes is not None:
+                    v = volumes.get(symbol, {})
+                    if min(v.get(h, 0.0), v.get(l, 0.0)) < min_volume:
+                        skipped_illiquid += 1
+                        continue
                 fee = 2.0 * (fees.get(h, 0.0005) + fees.get(l, 0.0005))
-                opp = pair_opportunity(hourly_h, hourly_l, fee)
+                opp = pair_opportunity(hourly_h, hourly_l, fee, slippage)
                 # Устойчивость считаем по часовым ставкам обеих ног.
                 st = sign_stability(
                     [hourly_rate(r, iv_h) for _, r in ser_h],
@@ -195,53 +224,111 @@ def build_report(
                     "apr": opp["apr_pct"], "daily": opp["daily_pct"],
                     "breakeven_h": opp["hours_to_breakeven"],
                     "stability": st, "points": min(n_h, n_l), "fee": fee,
+                    "vol": (min(volumes.get(symbol, {}).get(h, 0.0),
+                                volumes.get(symbol, {}).get(l, 0.0))
+                            if volumes else None),
                 })
 
     if not rows:
+        extra = (f" Отсеяно по ликвидности: {skipped_illiquid}."
+                 if skipped_illiquid else "")
         return ("Funding-анализ: подходящих связок не найдено "
-                "(нет истории или ставки везде равны).")
+                "(нет истории или ставки везде равны)." + extra)
 
     rows.sort(key=lambda r: r["apr"], reverse=True)
+    avg_fee = sum(r["fee"] for r in rows) / len(rows)
     lines = [
         "=== FUNDING-АРБИТРАЖ: анализ по истории ===",
-        f"Проанализировано пар: {len(data)} | найдено связок с положительным "
-        f"дифференциалом: {len(rows)}",
+        f"Проанализировано пар: {len(data)} | связок с положительным "
+        f"дифференциалом: {len(rows)}"
+        + (f" | отсеяно по ликвидности: {skipped_illiquid}" if skipped_illiquid else ""),
         "",
         "Держим SHORT на бирже H (получаем funding) и LONG на L (платим).",
-        "«окуп.» — часов удержания, чтобы накопленный funding покрыл комиссии.",
+        f"«окуп.» — часов удержания, чтобы доход покрыл ВСЕ издержки входа и "
+        f"выхода: комиссии ~{avg_fee * 100:.2f}% + слиппедж {slippage * 100:.2f}%.",
         "«устойч.» — доля периодов, где знак дифференциала сохранялся.",
-        "",
-        f"{'пара':<16}{'H → L':<20}{'% годовых':>10}{'% в сутки':>11}"
-        f"{'окуп.,ч':>9}{'устойч.':>9}",
     ]
+    if not slippage:
+        lines.append("ВНИМАНИЕ: слиппедж = 0, окупаемость ЗАНИЖЕНА. На тонких парах "
+                     "он кратно превышает комиссии — задай --funding-slippage.")
+    lines.append("")
+    head = (f"{'пара':<16}{'H → L':<20}{'% годовых':>10}{'% в сутки':>11}"
+            f"{'окуп.,ч':>9}{'устойч.':>9}")
+    if volumes:
+        head += f"{'оборот,$':>12}"
+    lines.append(head)
     shown = [r for r in rows
              if r["stability"] is None or r["stability"] >= min_stability][:top]
     for r in shown:
         st = f"{r['stability'] * 100:.0f}%" if r["stability"] is not None else "—"
         be = f"{r['breakeven_h']:.0f}" if r["breakeven_h"] else "—"
-        lines.append(f"{r['symbol']:<16}{r['high'] + ' → ' + r['low']:<20}"
-                     f"{r['apr']:>10.1f}{r['daily']:>11.3f}{be:>9}{st:>9}")
+        line = (f"{r['symbol']:<16}{r['high'] + ' → ' + r['low']:<20}"
+                f"{r['apr']:>10.1f}{r['daily']:>11.3f}{be:>9}{st:>9}")
+        if volumes:
+            line += f"{_short_money(r['vol']):>12}"
+        lines.append(line)
 
     # Практический вывод: годовые проценты бесполезны, если окупаемость дольше,
     # чем ставка вообще держится. Поэтому отдельно считаем реалистичные связки.
-    good = [r for r in shown if r["breakeven_h"] and r["breakeven_h"] <= 24]
+    good = [r for r in shown if r["breakeven_h"] and r["breakeven_h"] <= 48]
     lines.append("")
     lines.append("--- Вывод ---")
     if good:
         best = good[0]
         lines.append(
-            f"  Связок с окупаемостью до суток: {len(good)}. Лучшая — "
+            f"  Связок с окупаемостью до 2 суток: {len(good)}. Лучшая — "
             f"{best['symbol']} {best['high']}→{best['low']}: "
-            f"{best['apr']:.0f}% годовых, комиссии отбиваются за "
+            f"{best['apr']:.0f}% годовых, издержки отбиваются за "
             f"{best['breakeven_h']:.0f}ч.")
-        lines.append("  ВАЖНО: это ИСТОРИЯ. Ставки меняются, и прошлый "
-                     "дифференциал не гарантирует будущий — проверять в dry_run.")
     else:
-        lines.append("  Связок с окупаемостью до суток НЕТ: дифференциал ставок "
-                     "не перекрывает комиссии за разумное время удержания.")
-        lines.append("  Это значит, что funding-арбитраж на текущих комиссиях "
-                     "нежизнеспособен — нужны мейкерские ставки или ниже тариф.")
+        lines.append("  Связок с окупаемостью до 2 суток НЕТ: дифференциал ставок "
+                     "не перекрывает издержки за разумное время удержания.")
+        lines.append("  На текущих тарифах это нежизнеспособно — нужны мейкерские "
+                     "комиссии или пары с меньшим слиппеджем.")
+    # Предупреждения важнее самих цифр: без них отчёт подталкивает к тому же
+    # неликвиду, на котором провалился ценовой арбитраж.
+    lines.append("  РИСК ЦЕНЫ: funding капает медленно, а цена двигается быстро. При "
+                 f"доходе {shown[0]['daily']:.2f}%/сутки расхождение цен на 2% "
+                 f"стирает {2 / max(shown[0]['daily'], 1e-9):.1f} суток дохода — "
+                 "поэтому пары обязаны быть ЛИКВИДНЫМИ и тождественными.")
+    lines.append("  Это ИСТОРИЯ: ставки меняются, прошлый дифференциал не "
+                 "гарантирует будущий. Проверять в dry_run.")
     return "\n".join(lines)
+
+
+async def collect_volumes(connectors: dict, symbols: list) -> dict:
+    """Суточный оборот в USDT по парам: {symbol: {exchange: quoteVolume}}.
+
+    Нужен, чтобы отсеять неликвид: на тонких парах цена бирж расходится, и это
+    съедает funding быстрее, чем он накапливается.
+    """
+    out: dict = {}
+    wanted = set(symbols)
+
+    async def one(name, conn):
+        client = conn.client
+        if not getattr(client, "has", {}).get("fetchTickers"):
+            return
+        try:
+            tickers = await client.fetch_tickers()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("fetch_tickers %s: %s", name, exc)
+            return
+        raw_to_sym = {m.raw_symbol: s
+                      for s, m in getattr(conn, "contracts", {}).items()}
+        for raw, t in (tickers or {}).items():
+            symbol = raw_to_sym.get(raw, raw)
+            if symbol not in wanted or not isinstance(t, dict):
+                continue
+            vol = t.get("quoteVolume")
+            if vol is None and t.get("baseVolume") and t.get("last"):
+                vol = float(t["baseVolume"]) * float(t["last"])
+            if vol:
+                out.setdefault(symbol, {})[name] = float(vol)
+
+    await asyncio.gather(*[one(n, c) for n, c in connectors.items()],
+                         return_exceptions=True)
+    return out
 
 
 async def collect(connectors: dict, symbols: list, days: int = 30,

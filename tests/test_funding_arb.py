@@ -3,6 +3,7 @@
 import pytest
 
 from arb.funding import (
+    collect_volumes,
     average_hourly,
     build_report,
     collect,
@@ -96,7 +97,7 @@ def test_report_warns_when_fees_not_covered():
     data = {"X/USDT": {"a": series(0.000010, 20, 8), "b": series(0.000001, 20, 8)}}
     text = build_report(data, {"a": 0.0005, "b": 0.0005})
     assert "НЕТ" in text
-    assert "нежизнеспособен" in text
+    assert "нежизнеспособно" in text
 
 
 def test_report_normalizes_different_intervals():
@@ -148,3 +149,57 @@ async def test_collect_builds_per_symbol_map():
     conns = {"a": _Conn("a", rows), "b": _Conn("b", rows)}
     data = await collect(conns, ["BTC/USDT"], days=7)
     assert set(data["BTC/USDT"]) == {"a", "b"}
+
+
+# ---- слиппедж и ликвидность (исправление ложно-оптимистичного отчёта) ----
+def test_slippage_dominates_breakeven():
+    """Регресс: первая версия считала окупаемость ТОЛЬКО по комиссиям и выдавала
+    5 часов там, где с учётом слиппеджа выходит ~45."""
+    no_slip = pair_opportunity(0.0004, 0.0, round_trip_fee=0.00279, slippage=0.0)
+    with_slip = pair_opportunity(0.0004, 0.0, round_trip_fee=0.00279, slippage=0.0156)
+    assert no_slip["hours_to_breakeven"] == pytest.approx(6.975)
+    assert with_slip["hours_to_breakeven"] == pytest.approx(45.975)
+    assert with_slip["hours_to_breakeven"] > no_slip["hours_to_breakeven"] * 6
+
+
+def test_report_warns_when_slippage_ignored():
+    data = {"X/USDT": {"a": series(0.008, 20, 8), "b": series(0.001, 20, 8)}}
+    text = build_report(data, {"a": 0.0005, "b": 0.0005}, slippage=0.0)
+    assert "ВНИМАНИЕ" in text and "ЗАНИЖЕНА" in text
+    # со слиппеджем предупреждения нет
+    text2 = build_report(data, {"a": 0.0005, "b": 0.0005}, slippage=0.0156)
+    assert "ЗАНИЖЕНА" not in text2
+
+
+def test_liquidity_filter_drops_thin_pairs():
+    """Неликвид не должен попадать в отчёт: именно на нём провалился ценовой арб."""
+    data = {"THIN/USDT": {"a": series(0.02, 20, 8), "b": series(0.001, 20, 8)},
+            "FAT/USDT": {"a": series(0.008, 20, 8), "b": series(0.001, 20, 8)}}
+    vols = {"THIN/USDT": {"a": 10_000, "b": 10_000},
+            "FAT/USDT": {"a": 50_000_000, "b": 40_000_000}}
+    text = build_report(data, {"a": 0.0005, "b": 0.0005}, slippage=0.0156,
+                        volumes=vols, min_volume=5_000_000)
+    assert "FAT/USDT" in text
+    assert "THIN/USDT" not in text          # отсеян, хотя доходность была ВЫШЕ
+    assert "отсеяно по ликвидности" in text
+
+
+def test_report_always_warns_about_price_risk():
+    data = {"X/USDT": {"a": series(0.008, 20, 8), "b": series(0.001, 20, 8)}}
+    text = build_report(data, {"a": 0.0005, "b": 0.0005}, slippage=0.0156)
+    assert "РИСК ЦЕНЫ" in text
+    assert "ЛИКВИДНЫМИ" in text
+
+
+async def test_collect_volumes_maps_raw_symbols():
+    class _C:
+        def __init__(self):
+            self.name = "a"
+            self.contracts = {"BTC/USDT": type("M", (), {"raw_symbol": "BTC/USDT:USDT"})()}
+            self.client = type("X", (), {
+                "has": {"fetchTickers": True},
+                "fetch_tickers": staticmethod(
+                    lambda: _ret({"BTC/USDT:USDT": {"quoteVolume": 1_000_000.0}})),
+            })()
+    vols = await collect_volumes({"a": _C()}, ["BTC/USDT"])
+    assert vols["BTC/USDT"]["a"] == 1_000_000.0

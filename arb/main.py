@@ -154,7 +154,7 @@ async def _run(args) -> None:
 
     # Анализ funding-арбитража по ИСТОРИЧЕСКИМ ставкам (сделок не совершает).
     if getattr(args, "funding_report", False):
-        from .funding import build_report, collect
+        from .funding import build_report, collect, collect_volumes
         connectors = create_connectors(config)
         try:
             await asyncio.gather(*[c.load_perp_contracts() for c in connectors.values()],
@@ -171,8 +171,14 @@ async def _run(args) -> None:
             log.info("Funding-анализ: %d пар, история за %d дней…",
                      len(symbols), args.funding_days)
             data = await collect(connectors, symbols, days=args.funding_days)
+            volumes = await collect_volumes(connectors, symbols)
             fees = {name: ex.taker_fee for name, ex in config.exchanges.items()}
-            log.info("\n%s", build_report(data, fees))
+            log.info("\n%s", build_report(
+                data, fees,
+                slippage=args.funding_slippage,
+                volumes=volumes,
+                min_volume=args.funding_min_volume,
+            ))
         finally:
             for conn in connectors.values():
                 await conn.close()
@@ -297,6 +303,12 @@ def main() -> None:
                         help="анализ funding-арбитража по истории ставок (без сделок)")
     parser.add_argument("--funding-days", type=int, default=30,
                         help="глубина истории ставок для --funding-report, дней")
+    parser.add_argument("--funding-slippage", type=float, default=0.0156,
+                        help="слиппедж входа+выхода (доля) для расчёта окупаемости; "
+                             "по умолчанию 0.0156 = 1.56%% по замерам на тонких парах")
+    parser.add_argument("--funding-min-volume", type=float, default=5_000_000,
+                        help="минимальный суточный оборот пары на КАЖДОЙ бирже, USDT "
+                             "(отсев неликвида, где цена расходится)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
